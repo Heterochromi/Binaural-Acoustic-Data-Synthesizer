@@ -48,7 +48,7 @@ class BatchedHRIR:
         self.hrir_path = os.path.join(sadie_path, self.subject_id, f"{self.subject_id}{hrir_path_slug}", f"{self.subject_id}{hrir_slug}")
         self.hrirTensor : RIRTensor = RIRTensor.from_sofa(self.hrir_path , device= device)
 
-    def _batch_load_directory(self, directory : str) -> tuple[torch.Tensor, torch.Tensor]:
+    def batch_load_directory(self, directory : str) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Load all WAV files from a directory and return padded tensor with original lengths.
 
@@ -120,9 +120,8 @@ class BatchedHRIR:
         return batch_tensor, original_lengths_tensor
 
 
-    def render_random_angles_HRIR(self, wavDirectory : str):
+    def render_random_angles_hrir(self, waveforms : torch.Tensor):
         # waveforms shape: [B, Channels, Time]
-        waveforms, lengths = self._batch_load_directory(wavDirectory)
 
         azmiuth = torch.empty(len(waveforms), device=self.device)
         azmiuth.uniform_(-180, 180)
@@ -165,17 +164,31 @@ class BatchedHRIR:
 
         convolved = torch.stack([convolved_left, convolved_right], dim=1)
 
-        return convolved, lengths, tupled_azimuth_elevation
+        return convolved, tupled_azimuth_elevation
 
+    def render_controlled_angel_hrir(self ,waveforms : torch.Tensor , azmiuth : torch.Tensor, elevation : torch.Tensor):
+        left_hrir, right_hrir = self.hrirTensor.angle_batch(azmiuth, elevation)
+        left_hrir = left_hrir.to(dtype=waveforms.dtype)
+        right_hrir = right_hrir.to(dtype=waveforms.dtype)
+        batch_size = waveforms.shape[0]
+        convolved_left = torch.nn.functional.conv1d(
+            waveforms.unsqueeze(0),
+            left_hrir.unsqueeze(1),
+            groups=batch_size,
+        ).squeeze(0)
 
+        convolved_right = torch.nn.functional.conv1d(
+            waveforms.unsqueeze(0),
+            right_hrir.unsqueeze(1),
+            groups=batch_size,
+        ).squeeze(0)
 
+        # Ensure output length matches input length
+        if convolved_left.shape[-1] > waveforms.shape[-1]:
+            print("Output length exceeds input length")
+            convolved_left = convolved_left[..., :waveforms.shape[-1]]
+            convolved_right = convolved_right[..., :waveforms.shape[-1]]
 
+        convolved = torch.stack([convolved_left, convolved_right], dim=1)
 
-
-
-
-
-
-
-    def controlled_angel_hrir(self ,wavTensor : torch.Tensor , azmiuth : torch.Tensor, elevation : torch.Tensor):
-        rirs = self.hrirTensor.angle_batch(azmiuth, elevation)
+        return convolved
