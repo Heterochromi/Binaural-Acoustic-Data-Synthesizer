@@ -6,7 +6,7 @@
 !.gitignore
 
 
-!src/sadieHRTF.py
+!src/batchedHrir.py
 !src/rirTensor.py
 
 !LICENSE
