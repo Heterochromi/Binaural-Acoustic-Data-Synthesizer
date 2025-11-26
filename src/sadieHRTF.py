@@ -1,6 +1,6 @@
 import torch
 import torchaudio
-from typing import Literal
+from typing import Literal , Iterator
 import os
 import numpy as np
 import sofar as sf
@@ -48,23 +48,20 @@ class BatchedHRIR:
         self.hrir_path = os.path.join(sadie_path, self.subject_id, f"{self.subject_id}{hrir_path_slug}", f"{self.subject_id}{hrir_slug}")
         self.hrirTensor : RIRTensor = RIRTensor.from_sofa(self.hrir_path , device= device)
 
-    def batch_load_directory(self, directory : str) -> tuple[torch.Tensor, torch.Tensor]:
+    def batch_load_directory(self, directory : str) -> Iterator[tuple[torch.Tensor, torch.Tensor]]:
         """
-        Load all WAV files from a directory and return padded tensor with original lengths.
+        Yields batches of WAV files from a directory.
 
         Args:
             directory: Path to directory containing WAV files
 
-        Returns:
+        Yields:
             Tuple of:
                 - batch_tensor: Tensor of shape [B, Time] where all audio is padded to the
-                  maximum length found in the directory
+                  maximum length found in the current batch
                 - original_lengths: Tensor of shape [B] containing original length (in samples) of each audio file
         """
         wav_files = []
-        waveforms = []
-        original_lengths = []
-        max_length = 0
 
         # Get all .wav files from directory
         for filename in sorted(os.listdir(directory)):
@@ -74,50 +71,60 @@ class BatchedHRIR:
         if not wav_files:
             raise ValueError(f"No WAV files found in directory: {directory}")
 
-        # Load all files and find maximum length
-        for filename in wav_files:
-            filepath = os.path.join(directory, filename)
-            waveform, sr = torchaudio.load(filepath)
-            waveform = waveform.to(self.device)
-
-            # Resample if necessary
-            if sr != self.sample_rate:
-                resampler = torchaudio.transforms.Resample(sr, self.sample_rate)
-                waveform = resampler(waveform)
-
-            # Convert to mono if stereo or multi-channel
-            if waveform.shape[0] > 1:
-                waveform = torch.mean(waveform, dim=0, keepdim=True)
-
-            # Remove channel dimension
-            waveform = waveform.squeeze(0)
-
-            # Store original length before padding
-            original_lengths.append(waveform.shape[-1])
-            waveforms.append(waveform)
-            max_length = max(max_length, waveform.shape[-1])
-
+        total_files = len(wav_files)
         if self.verbose:
-            print(f"Loaded {len(waveforms)} WAV files from {directory}")
-            print(f"Maximum audio length: {max_length} samples")
+            print(f"Found {total_files} WAV files in {directory}. Processing in batches of {self.batch_size}.")
 
-        # Pad all waveforms to max length
-        padded_waveforms = []
-        for waveform in waveforms:
-            current_length = waveform.shape[-1]
-            if current_length < max_length:
-                # Pad on the right (end) with zeros
-                padding = (0, max_length - current_length)
-                waveform = torch.nn.functional.pad(waveform, padding)
-            padded_waveforms.append(waveform)
+        for i in range(0, total_files, self.batch_size):
+            batch_files = wav_files[i : i + self.batch_size]
+            waveforms = []
+            original_lengths = []
+            max_length = 0
 
-        # Stack all waveforms into batch tensor [B, Time]
-        batch_tensor = torch.stack(padded_waveforms, dim=0)
+            # Load files in current batch and find maximum length
+            for filename in batch_files:
+                filepath = os.path.join(directory, filename)
+                waveform, sr = torchaudio.load(filepath)
+                waveform = waveform.to(self.device)
 
-        # Convert original lengths to tensor
-        original_lengths_tensor = torch.tensor(original_lengths, dtype=torch.int32)
+                # Resample if necessary
+                if sr != self.sample_rate:
+                    resampler = torchaudio.transforms.Resample(sr, self.sample_rate)
+                    waveform = resampler(waveform)
 
-        return batch_tensor, original_lengths_tensor
+                # Convert to mono if stereo or multi-channel
+                if waveform.shape[0] > 1:
+                    waveform = torch.mean(waveform, dim=0, keepdim=True)
+
+                # Remove channel dimension
+                waveform = waveform.squeeze(0)
+
+                # Store original length before padding
+                original_lengths.append(waveform.shape[-1])
+                waveforms.append(waveform)
+                max_length = max(max_length, waveform.shape[-1])
+
+            if self.verbose:
+                # print(len(waveforms))
+                print(f"Batch {i // self.batch_size + 1}: Loaded {len(waveforms)} files. Max length: {max_length}")
+
+            # Pad all waveforms to max length of the batch
+            padded_waveforms = []
+            for waveform in waveforms:
+                current_length = waveform.shape[-1]
+                if current_length < max_length:
+                    # Pad on the right (end) with zeros
+                    padding = (0, max_length - current_length)
+                    waveform = torch.nn.functional.pad(waveform, padding)
+                padded_waveforms.append(waveform)
+
+            # Stack all waveforms into batch tensor [B, Time]
+            batch_tensor = torch.stack(padded_waveforms, dim=0)
+
+            # Convert original lengths to tensor
+            original_lengths_tensor = torch.tensor(original_lengths, dtype=torch.int32)
+
+            yield batch_tensor, original_lengths_tensor
 
 
     def render_random_angles_hrir(self, waveforms : torch.Tensor):
@@ -140,9 +147,6 @@ class BatchedHRIR:
         # Reshape inputs for group convolution
         # waveforms: [Batch, Time] -> [1, Batch, Time]
         # hrir: [Batch, Kernel] -> [Batch, 1, Kernel]
-
-        # We use padding to maintain roughly the same length
-        # padding = left_hrir.shape[-1] // 2
 
         convolved_left = torch.nn.functional.conv1d(
             waveforms.unsqueeze(0),
@@ -171,6 +175,10 @@ class BatchedHRIR:
         left_hrir = left_hrir.to(dtype=waveforms.dtype)
         right_hrir = right_hrir.to(dtype=waveforms.dtype)
         batch_size = waveforms.shape[0]
+
+        if batch_size != len(azmiuth) and batch_size != len(elevation):
+            raise ValueError("Size mismatch , make sure the batch size matches the number of azimuth and elevation angles")
+
         convolved_left = torch.nn.functional.conv1d(
             waveforms.unsqueeze(0),
             left_hrir.unsqueeze(1),
