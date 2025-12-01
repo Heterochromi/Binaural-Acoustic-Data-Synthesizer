@@ -170,6 +170,8 @@ class BatchedHRIR:
 
         return convolved, tupled_azimuth_elevation
 
+    # get
+
     def render_controlled_angel_hrir(self ,waveforms : torch.Tensor , azmiuth : torch.Tensor, elevation : torch.Tensor):
         left_hrir, right_hrir = self.hrirTensor.angle_batch(azmiuth, elevation)
         left_hrir = left_hrir.to(dtype=waveforms.dtype)
