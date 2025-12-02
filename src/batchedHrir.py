@@ -46,7 +46,7 @@ class BatchedHRIR:
             raise ValueError("Unsupported sample rate")
 
         self.hrir_path = os.path.join(sadie_path, self.subject_id, f"{self.subject_id}{hrir_path_slug}", f"{self.subject_id}{hrir_slug}")
-        self.hrirTensor : RIRTensor = RIRTensor.from_sofa(self.hrir_path , device= device)
+        self.hrirTensor : RIRTensor = RIRTensor.from_sofa(self.hrir_path , device=device)
 
     def batch_load_directory(self, directory : str) -> Iterator[tuple[torch.Tensor, torch.Tensor]]:
         """
