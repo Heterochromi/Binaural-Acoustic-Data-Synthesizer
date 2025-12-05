@@ -7,167 +7,163 @@ GITHUB: https://github.com/tencent-ailab/FRA-RIR/blob/main/FRAM_RIR.py
 CITATION: Luo, Y., & Gu, R. (2024, April). Fast random approximation of multi-channel room impulse response. In 2024 IEEE International Conference on Acoustics, Speech, and Signal Processing Workshops (ICASSPW) (pp. 449-454). IEEE.
 """
 
+from typing import Literal, Tuple
+
 import torch
-from typing import Tuple, Literal
 from torch import Tensor
-from torchaudio.transforms import Resample
 from torchaudio.functional import highpass_biquad
+from torchaudio.transforms import Resample
+
 from src.rirTensor import RIRTensor
 
-def FRAM_BRIR(
-    sr: int,
+
+def fram_brir(
+    target_sr: int,
+    hrir_sr: int,
     t60: float,
+    h_rir: RIRTensor,
     mic_pos: Tensor = torch.tensor([1, 1, 1]),
     room_dim: Tensor = torch.tensor([4, 4, 4]),
     src_pos: Tensor = torch.tensor([1, 1, 1]),
-    direct_range: Tuple[int, int] = (-6, 50),
-    n_image: Tuple[int, int] = (1024, 4097),
+    n_image: Tuple[int, int] = (100, 500),
     a: float = -2.0,
     b: float = 2.0,
     tau: float = 0.25,
-    device: Literal["cpu", "cuda"] = "cpu"
-) -> Tuple[Tensor, Tensor]:
+    device: Literal["cpu", "cuda"] = "cpu",
+) -> Tensor:
     """
     all source and microphone pick up patterns will technically be OMNI at first but then changed when mixed HRIR to match direction.
-    this function is time invariant therefor it can not work with multi source scenarios with different timings, a simple soution is to mix the outputted BRIR wavs together after, this implementaion will be single source.
-    """
+    this function is time invariant therefor it can not work with multi source scenarios with different timings,
+    a simple soution is to get the reverb only IR or (BRIR) then apply it to the audio signal and mix it with a HRIR of the dry source.
 
+    Args:
+        t60 (float): The reverberation time in seconds.
+        h_rir (RIRTensor): The head-related impulse class that generates the HRIRs for the reflections.
+        mic_pos (Tensor): The position of the microphone/receiver.
+        room_dim (Tensor): The dimensions of the room.
+        src_pos (Tensor): The position of the sound source.
+        n_image (Tuple[int, int]): Range to sample from a number of reflections.
+        a (float): Minimum of the random perturbation.
+        b (float): Maximum of the random perturbation.
+        tau (float): The time constant for the exponential decay(distance shrinkage factor).
+        device (Literal["cpu", "cuda"]): The device to use.
+
+        Returns:
+            Tensor: 2 channel reverb only BRIR (reverb tail).
+
+    """
     mic_pos = mic_pos.to(device)
     src_pos = src_pos.to(device)
     room_dim = room_dim.to(device)
+    downsampler = Resample(orig_freq=hrir_sr, new_freq=target_sr).to(device)
 
-    image = torch.randint(low=n_image[0], high=n_image[1], size=(1,), device=device).item()
+    if target_sr < hrir_sr:
+        print(
+            "Warning: Target sample rate is lower than HRIR sample rate, this can cause worse timing accuracy"
+        )
 
+    if hrir_sr >= 88200:  # Covers 96k
+        hrir_len = 512
+    else:  # Covers 44.1k, 48k
+        hrir_len = 256
 
-    room_dim = room_dim.to(device)
-    volume_to_surface_area_ratio = 1.0 / (2 * (1.0/room_dim[0] + 1.0/room_dim[1] + 1.0/room_dim[2]))
+    # randomly sample number of reflections
+    image_count = torch.randint(
+        low=n_image[0], high=n_image[1], size=(1,), device=device
+    ).item()
 
+    #  geometric environment set up
+    volume_to_surface_area_ratio = 1.0 / (
+        2 * (1.0 / room_dim[0] + 1.0 / room_dim[1] + 1.0 / room_dim[2])
+    )
     eps = torch.finfo(torch.float32).eps
+    velocity = 343.0
 
     direct_dist = torch.sqrt((mic_pos - src_pos).pow(2).sum(dim=-1) + eps)
+    t60_tensor = torch.tensor(t60, device=device).float()
 
-    ratio = 64
-    sample_sr = sr*ratio
-    velocity = 343
-    t60 = torch.tensor(t60 , device=device).float()
+    reflect_coef = torch.sqrt(
+        (1 - (1 - torch.exp(-0.16 * volume_to_surface_area_ratio / t60_tensor)).pow(2))
+    )
+    reflect_max = (torch.log10(torch.tensor(velocity * t60)) - 3) / torch.log10(
+        reflect_coef
+    )
 
-    direct_idx = torch.ceil(direct_dist * sample_sr / velocity).long()
-
-    rir_length = int(torch.ceil(sample_sr * t60).item())
-
-    resample_ratio_sqrt = int(torch.sqrt(torch.tensor(ratio)).item())
-    resample1 = Resample(sample_sr, sample_sr // resample_ratio_sqrt).to(device)
-    resample2 = Resample(sample_sr // resample_ratio_sqrt, sr).to(device)
-
-    reflect_coef = torch.sqrt((1 - (1 - torch.exp(-0.16*volume_to_surface_area_ratio/t60)).pow(2)))
-
+    # Distances
     dist_range = torch.linspace(
-        1.0,
-        velocity * t60 / direct_dist - 1,
-        rir_length,
-        device=device
+        1.0, velocity * t60 / direct_dist - 1, int(hrir_sr * t60), device=device
     )
-
-    dist_prob = torch.linspace(0, 1.0, rir_length , device=device)
+    dist_prob = torch.linspace(0, 1.0, int(hrir_sr * t60), device=device)
     dist_prob /= dist_prob.sum()
-
-    dist_select_idx = dist_prob.multinomial(
-        num_samples=image,
-        replacement=True,
-    )
+    dist_select_idx = dist_prob.multinomial(num_samples=image_count, replacement=True)
     dist_nearest_ratio = dist_range[dist_select_idx]
 
-    azm = torch.empty(image, device=device).uniform_(-torch.pi, torch.pi)
-    ele = torch.empty(image, device=device).uniform_(-torch.pi/2, torch.pi/2)
-    unit_3d = torch.stack([torch.sin(ele) * torch.cos(azm), torch.sin(ele) * torch.sin(azm), torch.cos(ele)], -1)
+    # Directions
+    azm = torch.empty(image_count, device=device).uniform_(-torch.pi, torch.pi)
+    ele = torch.empty(image_count, device=device).uniform_(-torch.pi / 2, torch.pi / 2)
 
+    unit_3d = torch.stack(
+        [
+            torch.sin(ele) * torch.cos(azm),
+            torch.sin(ele) * torch.sin(azm),
+            torch.cos(ele),
+        ],
+        -1,
+    )
 
-    azm_degree = torch.rad2deg(azm)
-    ele_degree = torch.rad2deg(ele)
-
-    image2nearest_dis =  dist_nearest_ratio * direct_dist
+    image2nearest_dis = dist_nearest_ratio * direct_dist
     image_position = mic_pos.unsqueeze(0) + image2nearest_dis.unsqueeze(-1) * unit_3d
-
     dist = torch.sqrt((mic_pos.unsqueeze(0) - image_position).pow(2).sum(-1) + eps)
 
-    reflect_max = (torch.log10(velocity*t60) - 3) / torch.log10(reflect_coef)
+    # Gain decays
+    reflect_ratio = (dist / (velocity * t60)) * (reflect_max - 1) + 1
+    reflect_pertub = torch.empty(image_count, device=device).uniform_(
+        a, b
+    ) * dist_nearest_ratio.pow(tau)
+    reflect_ratio = torch.maximum(
+        reflect_ratio + reflect_pertub, torch.ones(image_count, device=device)
+    )
+    gains = reflect_coef.pow(reflect_ratio) / dist
 
-    reflect_ratio = (dist / (velocity*t60)) * (reflect_max - 1) + 1
+    # Time delays
+    delays = torch.ceil(dist * hrir_sr / velocity).long()
 
-    reflect_pertub = torch.empty(image, device=device).uniform_(a, b) * dist_nearest_ratio.pow(tau)
-    reflect_ratio = torch.maximum(reflect_ratio + reflect_pertub, torch.ones(image, device=device))
-    # Concatenate direct path (index 0) with image reflections
-    dist = torch.cat([direct_dist.unsqueeze(0), dist], 0)  # Shape: [1 + image]
-    reflect_ratio = torch.cat([torch.zeros(1, device=device), reflect_ratio], 0)  # Shape: [1 + image]
+    rir_length_high = int(hrir_sr * t60)
 
+    valid_mask = (delays + hrir_len) < rir_length_high
 
-    delta_idx = torch.ceil(dist * sample_sr / velocity).long()
+    delays = delays[valid_mask]
+    gains = gains[valid_mask]
 
+    azm_valid = azm[valid_mask]
+    ele_valid = ele[valid_mask]
 
-    delta_decay = reflect_coef.pow(reflect_ratio) / dist  # Shape: [1 + image]
+    # HRIR Generation
+    azm_degree = torch.rad2deg(azm_valid)
+    ele_degree = torch.rad2deg(ele_valid)
 
+    left_hrirs, right_hrirs = h_rir.angle_batch(azm_degree, ele_degree)
 
-    rir = torch.zeros(rir_length , device=device)
+    time_offsets = torch.arange(hrir_len, device=device).unsqueeze(0)
 
-    valid_mask = delta_idx < rir_length
-    valid_indices = delta_idx[valid_mask]
-    valid_decays = delta_decay[valid_mask]
+    target_indices_matrix = delays.unsqueeze(1) + time_offsets
+    flat_indices = target_indices_matrix.view(-1)
 
-    # Vectorized accumulation
-    rir.index_add_(0, valid_indices, valid_decays)
+    weighted_left = left_hrirs * gains.unsqueeze(1)
+    weighted_right = right_hrirs * gains.unsqueeze(1)
 
-    start_idx = max(int(direct_idx.item() + sample_sr * direct_range[0] // 1000), 0)
-    end_idx = min(int(direct_idx.item() + sample_sr * direct_range[1] // 1000), rir_length)
+    flat_left = weighted_left.view(-1)
+    flat_right = weighted_right.view(-1)
 
-    arange_tensor = torch.arange(rir_length, device=device)
-    direct_mask = ((arange_tensor >= start_idx) & (arange_tensor < end_idx)).float()
+    brir_high = torch.zeros((2, rir_length_high), device=device)
+    brir_high[0].index_add_(0, flat_indices, flat_left.float())
+    brir_high[1].index_add_(0, flat_indices, flat_right.float())
 
-    rir_direct = rir * direct_mask
-    # Stack the two RIRs (reflective and direct)
-    all_rir = torch.stack([rir, rir_direct], 0)  # Shape: [2, rir_length]
+    # Apply highpass filter to remove low-frequency noise and then downsample to target sample rate, just like original FRAM
+    brir_high = highpass_biquad(brir_high, hrir_sr, 80.0)
+    brir_final = downsampler(brir_high)
 
-    # Process through resampling and filtering
-    rir_downsample = resample1(all_rir)
-    rir_hp =  torch.tensor(0.0)
-    rir_hp = highpass_biquad(rir_downsample, sample_sr // resample_ratio_sqrt, 80.)
-
-    rir_final = resample2(rir_hp).float()
-
-
-    full_rir = rir_final[0]
-    direct_component = rir_final[1]
-
-    return full_rir, direct_component
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+    return brir_final
 
 
 """!

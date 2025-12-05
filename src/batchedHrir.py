@@ -1,20 +1,47 @@
+import os
+from typing import Iterator, Literal
+
 import torch
 import torchaudio
-from typing import Literal , Iterator
-import os
-import numpy as np
-import sofar as sf
+
+# import numpy as np
+# import sofar as sf
 from rirTensor import RIRTensor
 
 
 class BatchedHRIR:
-    def __init__(self,
-                 sample_rate: Literal[44100, 48000, 96000],
-                 subject_id: Literal["D1", "D2", "H3", "H4", "H5", "H6", "H7", "H8", "H9", "H10", "H11", "H12", "H13", "H14", "H15", "H16", "H17", "H18", "H19", "H20"] = "D2",
-                 interpolation_mode: Literal["auto", "nearest", "two_point", "three_point"] = "auto",
-                 verbose: bool = False,
-                 batch_size: int = 32,
-                 device: Literal['cpu', 'cuda'] = 'cpu'):
+    def __init__(
+        self,
+        sample_rate: Literal[44100, 48000, 96000],
+        subject_id: Literal[
+            "D1",
+            "D2",
+            "H3",
+            "H4",
+            "H5",
+            "H6",
+            "H7",
+            "H8",
+            "H9",
+            "H10",
+            "H11",
+            "H12",
+            "H13",
+            "H14",
+            "H15",
+            "H16",
+            "H17",
+            "H18",
+            "H19",
+            "H20",
+        ] = "D2",
+        interpolation_mode: Literal[
+            "auto", "nearest", "two_point", "three_point"
+        ] = "auto",
+        verbose: bool = False,
+        batch_size: int = 32,
+        device: Literal["cpu", "cuda"] = "cpu",
+    ):
         """
         Args:
             subject_ids: Subject HRIR to use
@@ -45,10 +72,17 @@ class BatchedHRIR:
         else:
             raise ValueError("Unsupported sample rate")
 
-        self.hrir_path = os.path.join(sadie_path, self.subject_id, f"{self.subject_id}{hrir_path_slug}", f"{self.subject_id}{hrir_slug}")
-        self.hrirTensor : RIRTensor = RIRTensor.from_sofa(self.hrir_path , device=device)
+        self.hrir_path = os.path.join(
+            sadie_path,
+            self.subject_id,
+            f"{self.subject_id}{hrir_path_slug}",
+            f"{self.subject_id}{hrir_slug}",
+        )
+        self.hrirTensor: RIRTensor = RIRTensor.from_sofa(self.hrir_path, device=device)
 
-    def batch_load_directory(self, directory : str) -> Iterator[tuple[torch.Tensor, torch.Tensor]]:
+    def batch_load_directory(
+        self, directory: str
+    ) -> Iterator[tuple[torch.Tensor, torch.Tensor]]:
         """
         Yields batches of WAV files from a directory.
 
@@ -65,7 +99,7 @@ class BatchedHRIR:
 
         # Get all .wav files from directory
         for filename in sorted(os.listdir(directory)):
-            if filename.lower().endswith('.wav'):
+            if filename.lower().endswith(".wav"):
                 wav_files.append(filename)
 
         if not wav_files:
@@ -73,7 +107,9 @@ class BatchedHRIR:
 
         total_files = len(wav_files)
         if self.verbose:
-            print(f"Found {total_files} WAV files in {directory}. Processing in batches of {self.batch_size}.")
+            print(
+                f"Found {total_files} WAV files in {directory}. Processing in batches of {self.batch_size}."
+            )
 
         for i in range(0, total_files, self.batch_size):
             batch_files = wav_files[i : i + self.batch_size]
@@ -106,7 +142,9 @@ class BatchedHRIR:
 
             if self.verbose:
                 # print(len(waveforms))
-                print(f"Batch {i // self.batch_size + 1}: Loaded {len(waveforms)} files. Max length: {max_length}")
+                print(
+                    f"Batch {i // self.batch_size + 1}: Loaded {len(waveforms)} files. Max length: {max_length}"
+                )
 
             # Pad all waveforms to max length of the batch
             padded_waveforms = []
@@ -126,8 +164,22 @@ class BatchedHRIR:
 
             yield batch_tensor, original_lengths_tensor
 
+    def render_random_angles_hrir(
+        self, waveforms: torch.Tensor, mode: Literal["full", "same", "valid"] = "full"
+    ):
+        """
+        Render HRIRs at random angles using FFT convolution.
 
-    def render_random_angles_hrir(self, waveforms : torch.Tensor):
+        Args:
+            waveforms: Input audio tensor of shape [B, Time]
+            mode: Convolution mode
+                - 'full': Returns full convolution (signal_len + kernel_len - 1)
+                - 'same': Returns output same length as input signal (signal_len)
+                - 'valid': Returns only valid portion (signal_len - kernel_len + 1)
+
+        Returns:
+            Tuple of (convolved audio [B, 2, Time], angles [B, 2])
+        """
         # waveforms shape: [B, Channels, Time]
 
         azmiuth = torch.empty(len(waveforms), device=self.device)
@@ -142,29 +194,51 @@ class BatchedHRIR:
         left_hrir = left_hrir.to(dtype=waveforms.dtype)
         right_hrir = right_hrir.to(dtype=waveforms.dtype)
 
-        batch_size = waveforms.shape[0]
 
-        # Reshape inputs for group convolution
-        # waveforms: [Batch, Time] -> [1, Batch, Time]
-        # hrir: [Batch, Kernel] -> [Batch, 1, Kernel]
 
-        convolved_left = torch.nn.functional.conv1d(
-            waveforms.unsqueeze(0),
-            left_hrir.unsqueeze(1),
-            groups=batch_size,
-        ).squeeze(0)
+        # Determine output length
+        signal_len = waveforms.shape[-1]
+        kernel_len = left_hrir.shape[-1]
+        output_len = signal_len + kernel_len - 1
 
-        convolved_right = torch.nn.functional.conv1d(
-            waveforms.unsqueeze(0),
-            right_hrir.unsqueeze(1),
-            groups=batch_size,
-        ).squeeze(0)
+        fft_len = 2 ** (output_len - 1).bit_length()
 
-        # Ensure output length matches input length
-        if convolved_left.shape[-1] > waveforms.shape[-1]:
-            print("Output length exceeds input length")
-            convolved_left = convolved_left[..., :waveforms.shape[-1]]
-            convolved_right = convolved_right[..., :waveforms.shape[-1]]
+        # FFT of waveforms and HRIRs
+        waveforms_fft = torch.fft.rfft(waveforms, n=fft_len, dim=-1)
+        left_hrir_fft = torch.fft.rfft(left_hrir, n=fft_len, dim=-1)
+        right_hrir_fft = torch.fft.rfft(right_hrir, n=fft_len, dim=-1)
+
+        # Multiply in frequency domain (element-wise per batch)
+        convolved_left_fft = waveforms_fft * left_hrir_fft
+        convolved_right_fft = waveforms_fft * right_hrir_fft
+
+        # IFFT back to time domain
+        convolved_left = torch.fft.irfft(convolved_left_fft, n=fft_len, dim=-1)
+        convolved_right = torch.fft.irfft(convolved_right_fft, n=fft_len, dim=-1)
+
+        # Trim based on mode
+        if mode == "full":
+            # Full convolution: signal_len + kernel_len - 1
+            convolved_left = convolved_left[..., :output_len]
+            convolved_right = convolved_right[..., :output_len]
+        elif mode == "same":
+            # Same as input signal length
+            convolved_left = convolved_left[..., :signal_len]
+            convolved_right = convolved_right[..., :signal_len]
+        elif mode == "valid":
+            # Only the valid portion without zero-padding effects
+            valid_len = signal_len - kernel_len + 1
+            if valid_len < 1:
+                raise ValueError(
+                    f"For 'valid' mode, signal length ({signal_len}) must be >= kernel length ({kernel_len})"
+                )
+            start_idx = kernel_len - 1
+            convolved_left = convolved_left[..., start_idx : start_idx + valid_len]
+            convolved_right = convolved_right[..., start_idx : start_idx + valid_len]
+        else:
+            raise ValueError(
+                f"Invalid mode: {mode}. Must be 'full', 'same', or 'valid'"
+            )
 
         convolved = torch.stack([convolved_left, convolved_right], dim=1)
 
@@ -172,32 +246,81 @@ class BatchedHRIR:
 
     # get
 
-    def render_controlled_angel_hrir(self ,waveforms : torch.Tensor , azmiuth : torch.Tensor, elevation : torch.Tensor):
+    def render_controlled_angel_hrir(
+        self,
+        waveforms: torch.Tensor,
+        azmiuth: torch.Tensor,
+        elevation: torch.Tensor,
+        mode: Literal["full", "same", "valid"] = "full",
+    ):
+        """
+        Render HRIRs at controlled angles using FFT convolution.
+
+        Args:
+            waveforms: Input audio tensor of shape [B, Time]
+            azmiuth: Azimuth angles in degrees [B]
+            elevation: Elevation angles in degrees [B]
+            mode: Convolution mode
+                - 'full': Returns full convolution (signal_len + kernel_len - 1)
+                - 'same': Returns output same length as input signal (signal_len)
+                - 'valid': Returns only valid portion (signal_len - kernel_len + 1)
+
+        Returns:
+            Convolved audio tensor of shape [B, 2, Time]
+        """
+        batch_size = waveforms.shape[0]
+        if batch_size != len(azmiuth) and batch_size != len(elevation):
+            raise ValueError(
+                "Batch size mismatch , waveforms length must match azmiuth and elevation [waveforms , azmiuth , elevation]"
+            )
+
         left_hrir, right_hrir = self.hrirTensor.angle_batch(azmiuth, elevation)
         left_hrir = left_hrir.to(dtype=waveforms.dtype)
         right_hrir = right_hrir.to(dtype=waveforms.dtype)
-        batch_size = waveforms.shape[0]
 
-        if batch_size != len(azmiuth) and batch_size != len(elevation):
-            raise ValueError("Size mismatch , make sure the batch size matches the number of azimuth and elevation angles")
+        # Determine output length
+        signal_len = waveforms.shape[-1]
+        kernel_len = left_hrir.shape[-1]
+        output_len = signal_len + kernel_len - 1
 
-        convolved_left = torch.nn.functional.conv1d(
-            waveforms.unsqueeze(0),
-            left_hrir.unsqueeze(1),
-            groups=batch_size,
-        ).squeeze(0)
+        fft_len = 2 ** (output_len - 1).bit_length()
 
-        convolved_right = torch.nn.functional.conv1d(
-            waveforms.unsqueeze(0),
-            right_hrir.unsqueeze(1),
-            groups=batch_size,
-        ).squeeze(0)
+        # FFT of waveforms and HRIRs
+        waveforms_fft = torch.fft.rfft(waveforms, n=fft_len, dim=-1)
+        left_hrir_fft = torch.fft.rfft(left_hrir, n=fft_len, dim=-1)
+        right_hrir_fft = torch.fft.rfft(right_hrir, n=fft_len, dim=-1)
 
-        # Ensure output length matches input length
-        if convolved_left.shape[-1] > waveforms.shape[-1]:
-            print("Output length exceeds input length")
-            convolved_left = convolved_left[..., :waveforms.shape[-1]]
-            convolved_right = convolved_right[..., :waveforms.shape[-1]]
+        # Multiply in frequency domain (element-wise per batch)
+        convolved_left_fft = waveforms_fft * left_hrir_fft
+        convolved_right_fft = waveforms_fft * right_hrir_fft
+
+        # IFFT back to time domain
+        convolved_left = torch.fft.irfft(convolved_left_fft, n=fft_len, dim=-1)
+        convolved_right = torch.fft.irfft(convolved_right_fft, n=fft_len, dim=-1)
+
+        # Trim based on mode
+        if mode == "full":
+            # Full convolution: signal_len + kernel_len - 1
+            convolved_left = convolved_left[..., :output_len]
+            convolved_right = convolved_right[..., :output_len]
+        elif mode == "same":
+            # Same as input signal length
+            convolved_left = convolved_left[..., :signal_len]
+            convolved_right = convolved_right[..., :signal_len]
+        elif mode == "valid":
+            # Only the valid portion without zero-padding effects
+            valid_len = signal_len - kernel_len + 1
+            if valid_len < 1:
+                raise ValueError(
+                    f"For 'valid' mode, signal length ({signal_len}) must be >= kernel length ({kernel_len})"
+                )
+            start_idx = kernel_len - 1
+            convolved_left = convolved_left[..., start_idx : start_idx + valid_len]
+            convolved_right = convolved_right[..., start_idx : start_idx + valid_len]
+        else:
+            raise ValueError(
+                f"Invalid mode: {mode}. Must be 'full', 'same', or 'valid'"
+            )
 
         convolved = torch.stack([convolved_left, convolved_right], dim=1)
 
