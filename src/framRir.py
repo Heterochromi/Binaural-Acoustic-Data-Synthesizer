@@ -57,7 +57,7 @@ def fram_brir(
     room_dim = room_dim.to(device)
     downsampler = Resample(orig_freq=hrir_sr, new_freq=target_sr).to(device)
 
-    if target_sr < hrir_sr:
+    if target_sr > hrir_sr:
         print(
             "Warning: Target sample rate is lower than HRIR sample rate, this can cause worse timing accuracy"
         )
@@ -126,7 +126,8 @@ def fram_brir(
     gains = reflect_coef.pow(reflect_ratio) / dist
 
     # Time delays
-    delays = torch.ceil(dist * hrir_sr / velocity).long()
+    path_diff = dist - direct_dist
+    delays = torch.ceil(path_diff * hrir_sr / velocity).long()
 
     rir_length_high = int(hrir_sr * t60)
 
