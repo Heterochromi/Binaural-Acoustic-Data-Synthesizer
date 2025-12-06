@@ -3,16 +3,15 @@ from typing import Iterator, Literal
 
 import torch
 import torchaudio
+from torchaudio.transforms import Resample
 
-# import numpy as np
-# import sofar as sf
 from rirTensor import RIRTensor
 
 
 class BatchedHRIR:
     def __init__(
         self,
-        sample_rate: Literal[44100, 48000, 96000],
+        sample_rate: int,
         subject_id: Literal[
             "D1",
             "D2",
@@ -45,15 +44,13 @@ class BatchedHRIR:
         """
         Args:
             subject_ids: Subject HRIR to use
-            sample_rate: Sample rate (44100, 48000, or 96000)
+            sample_rate: Sample rate
             interpolation_mode: method to estimate angel that does not exactly exist in sadie
             verbose: Enable detailed output
             batch_size: Size of batches to process
         """
         sadie_path = "sadie/Database-Master_V2-1"
         hrir_path_slug = "_HRIR_SOFA"
-        hrir_slug_44k = "_44K_16bit_256tap_FIR_SOFA.sofa"  # Slug for the 44.1 kHz 16-bit 256-tap FIR SOFA file
-        hrir_slug_48k = "_48K_24bit_256tap_FIR_SOFA.sofa"  # Slug for the 48 kHz 24-bit 256-tap FIR SOFA file
         hrir_slug_96k = "_96K_24bit_512tap_FIR_SOFA.sofa"  # Slug for the 96 kHz 24-bit 512-tap FIR SOFA file
         self.subject_id = subject_id
         self.sample_rate = sample_rate
@@ -62,22 +59,16 @@ class BatchedHRIR:
         self.batch_size = batch_size
         self.device = device
 
-        # example fulle end result path "sadie/Database-Master_V2-1/D2/D2_HRIR_SOFA/D2_44K_16bit_256tap_FIR_SOFA.sofa"
-        if self.sample_rate == 44100:
-            hrir_slug = hrir_slug_44k
-        elif self.sample_rate == 48000:
-            hrir_slug = hrir_slug_48k
-        elif self.sample_rate == 96000:
-            hrir_slug = hrir_slug_96k
-        else:
-            raise ValueError("Unsupported sample rate")
+        if self.sample_rate > 96000:
+            raise ValueError("Sample rate must be less than or equal to 96 kHz")
 
         self.hrir_path = os.path.join(
             sadie_path,
             self.subject_id,
             f"{self.subject_id}{hrir_path_slug}",
-            f"{self.subject_id}{hrir_slug}",
+            f"{self.subject_id}{hrir_slug_96k}",
         )
+        self.sampler = Resample(orig_freq=96000, new_freq=self.sample_rate).to(device)
         self.hrirTensor: RIRTensor = RIRTensor.from_sofa(self.hrir_path, device=device)
 
     def batch_load_directory(
@@ -125,8 +116,7 @@ class BatchedHRIR:
 
                 # Resample if necessary
                 if sr != self.sample_rate:
-                    resampler = torchaudio.transforms.Resample(sr, self.sample_rate)
-                    waveform = resampler(waveform)
+                    waveform = self.sampler(waveform)
 
                 # Convert to mono if stereo or multi-channel
                 if waveform.shape[0] > 1:
@@ -196,6 +186,8 @@ class BatchedHRIR:
         # Convert HRIRs to match waveform dtype
         left_hrir = left_hrir.to(dtype=waveforms.dtype)
         right_hrir = right_hrir.to(dtype=waveforms.dtype)
+        left_hrir = self.sampler(left_hrir)
+        right_hrir = self.sampler(right_hrir)
 
         # Determine output length
         signal_len = waveforms.shape[-1]
@@ -245,8 +237,6 @@ class BatchedHRIR:
 
         return convolved, tupled_azimuth_elevation
 
-    # get
-
     def render_controlled_angel_hrir(
         self,
         waveforms: torch.Tensor,
@@ -278,6 +268,8 @@ class BatchedHRIR:
         left_hrir, right_hrir = self.hrirTensor.angle_batch(azmiuth, elevation)
         left_hrir = left_hrir.to(dtype=waveforms.dtype)
         right_hrir = right_hrir.to(dtype=waveforms.dtype)
+        left_hrir = self.sampler(left_hrir)
+        right_hrir = self.sampler(right_hrir)
 
         # Determine output length
         signal_len = waveforms.shape[-1]

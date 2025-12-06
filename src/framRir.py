@@ -19,9 +19,9 @@ from src.rirTensor import RIRTensor
 
 def fram_brir(
     target_sr: int,
-    hrir_sr: int,
     t60: float,
     h_rir: RIRTensor,
+    hrir_sr: int = 96000,
     mic_pos: Tensor = torch.tensor([1, 1, 1]),
     room_dim: Tensor = torch.tensor([4, 4, 4]),
     src_pos: Tensor = torch.tensor([1, 1, 1]),
@@ -62,9 +62,9 @@ def fram_brir(
             "Warning: Target sample rate is lower than HRIR sample rate, this can cause worse timing accuracy"
         )
 
-    if hrir_sr >= 88200:  # Covers 96k
+    if hrir_sr == 96000:
         hrir_len = 512
-    else:  # Covers 44.1k, 48k
+    else:
         hrir_len = 256
 
     # randomly sample number of reflections
