@@ -14,7 +14,7 @@ from torch import Tensor
 from torchaudio.functional import highpass_biquad
 from torchaudio.transforms import Resample
 
-from src.rirTensor import RIRTensor
+from .rirTensor import RIRTensor
 
 
 def fram_brir(
@@ -25,11 +25,11 @@ def fram_brir(
     mic_pos: Tensor = torch.tensor([1, 1, 1]),
     room_dim: Tensor = torch.tensor([4, 4, 4]),
     src_pos: Tensor = torch.tensor([1, 1, 1]),
-    n_image: Tuple[int, int] = (100, 500),
+    n_reflection: Tuple[int, int] = (100, 500),
     a: float = -2.0,
     b: float = 2.0,
     tau: float = 0.25,
-    device: Literal["cpu", "cuda"] = "cpu",
+    device: torch.device = torch.device("cpu"),
 ) -> Tensor:
     """
     all source and microphone pick up patterns will technically be OMNI at first but then changed when mixed HRIR to match direction.
@@ -42,11 +42,11 @@ def fram_brir(
         mic_pos (Tensor): The position of the microphone/receiver.
         room_dim (Tensor): The dimensions of the room.
         src_pos (Tensor): The position of the sound source.
-        n_image (Tuple[int, int]): Range to sample from a number of reflections.
+        n_reflection (Tuple[int, int]): Range to sample from a number of reflections.
         a (float): Minimum of the random perturbation.
         b (float): Maximum of the random perturbation.
         tau (float): The time constant for the exponential decay(distance shrinkage factor).
-        device (Literal["cpu", "cuda"]): The device to use.
+        device (torch.device): The device to use.
 
         Returns:
             Tensor: 2 channel reverb only BRIR (reverb tail).
@@ -69,7 +69,7 @@ def fram_brir(
 
     # randomly sample number of reflections
     image_count = torch.randint(
-        low=n_image[0], high=n_image[1], size=(1,), device=device
+        low=n_reflection[0], high=n_reflection[1], size=(1,), device=device
     ).item()
 
     #  geometric environment set up
@@ -116,7 +116,7 @@ def fram_brir(
     dist = torch.sqrt((mic_pos.unsqueeze(0) - image_position).pow(2).sum(-1) + eps)
 
     # Gain decays
-    reflect_ratio = (dist / (velocity * t60)) * (reflect_max - 1) + 1
+    reflect_ratio = (dist / (velocity * t60_tensor)) * (reflect_max - 1) + 1
     reflect_pertub = torch.empty(image_count, device=device).uniform_(
         a, b
     ) * dist_nearest_ratio.pow(tau)
@@ -129,19 +129,31 @@ def fram_brir(
     path_diff = dist - direct_dist
     delays = torch.ceil(path_diff * hrir_sr / velocity).long()
 
-    rir_length_high = int(hrir_sr * t60)
+    rir_length_high = int(hrir_sr * t60_tensor)
 
     valid_mask = (delays + hrir_len) < rir_length_high
 
     delays = delays[valid_mask]
     gains = gains[valid_mask]
 
-    azm_valid = azm[valid_mask]
-    ele_valid = ele[valid_mask]
+    valid_image_pos = image_position[valid_mask]
+    vec_mic_to_img = valid_image_pos - mic_pos.unsqueeze(0)
+
+    # azm_valid = azm[valid_mask]
+    # ele_valid = ele[valid_mask]
 
     # HRIR Generation
-    azm_degree = torch.rad2deg(azm_valid)
-    ele_degree = torch.rad2deg(ele_valid)
+
+    radius = torch.sqrt(vec_mic_to_img.pow(2).sum(dim=-1) + eps)
+    ux = vec_mic_to_img[..., 0] / radius
+    uy = vec_mic_to_img[..., 1] / radius
+    uz = vec_mic_to_img[..., 2] / radius
+
+    azm_of_arrival = torch.atan2(uy, ux)
+    ele_of_arrival = torch.asin(uz)
+
+    azm_degree = torch.rad2deg(azm_of_arrival)
+    ele_degree = torch.rad2deg(ele_of_arrival)
 
     left_hrirs, right_hrirs = h_rir.angle_batch(azm_degree, ele_degree)
 
