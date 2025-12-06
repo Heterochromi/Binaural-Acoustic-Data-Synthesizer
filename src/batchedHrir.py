@@ -135,6 +135,9 @@ class BatchedHRIR:
                 # Remove channel dimension
                 waveform = waveform.squeeze(0)
 
+                # Normalize
+                waveform = waveform / waveform.abs().max()
+
                 # Store original length before padding
                 original_lengths.append(waveform.shape[-1])
                 waveforms.append(waveform)
@@ -193,8 +196,6 @@ class BatchedHRIR:
         # Convert HRIRs to match waveform dtype
         left_hrir = left_hrir.to(dtype=waveforms.dtype)
         right_hrir = right_hrir.to(dtype=waveforms.dtype)
-
-
 
         # Determine output length
         signal_len = waveforms.shape[-1]
