@@ -1,4 +1,4 @@
-from typing import Literal, Optional, Tuple, Union
+from typing import Literal, Tuple, Union
 
 import sofar as sf
 import torch

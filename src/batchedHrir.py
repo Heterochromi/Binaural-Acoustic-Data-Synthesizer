@@ -5,7 +5,7 @@ import torch
 import torchaudio
 from torchaudio.transforms import Resample
 
-from rirTensor import RIRTensor
+from .rirTensor import RIRTensor
 
 
 class BatchedHRIR:
