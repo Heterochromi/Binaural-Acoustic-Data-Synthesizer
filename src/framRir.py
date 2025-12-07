@@ -17,6 +17,43 @@ from torchaudio.transforms import Resample
 from .rirTensor import RIRTensor
 
 
+def dist_first_order_reflection(src_pos: Tensor, mic_pos: Tensor, room_dim: Tensor):
+    """
+    Generate first order reflection directions for a given source and microphone position within a room.
+    Note: this is actually the same method used in the original ISM(Image source method) creating a room of perfect mirrors to trace reflections,
+    FRAM-RIR actually skips this and uses a heuristic probability approach(FASTER) to create reflections,
+    but i will simply calculate the first order reflections and stop there just to be able to get an accurate initial Time Delay.
+
+    Args:
+        src_pos (Tensor): Source position in the room.
+        mic_pos (Tensor): Microphone position in the room.
+        room_dim (Tensor): Room dimensions.
+
+    Returns:
+        Tensor: Reflection directions.
+    """
+    image_x0 = torch.stack([-src_pos[0], src_pos[1], src_pos[2]])
+    image_xR = torch.stack([2 * room_dim[0] - src_pos[0], src_pos[1], src_pos[2]])
+
+    image_y0 = torch.stack([src_pos[0], -src_pos[1], src_pos[2]])
+    image_yR = torch.stack([src_pos[0], 2 * room_dim[1] - src_pos[1], src_pos[2]])
+
+    image_z0 = torch.stack([src_pos[0], src_pos[1], -src_pos[2]])
+    image_zR = torch.stack([src_pos[0], src_pos[1], 2 * room_dim[2] - src_pos[2]])
+
+    images_all = torch.stack(
+        [image_x0, image_xR, image_y0, image_yR, image_z0, image_zR]
+    )
+
+    diff = images_all - mic_pos.unsqueeze(0)
+
+    dists = torch.sqrt(diff.pow(2).sum(dim=-1) + 1e-8)
+
+    min_reflection_dist = torch.min(dists)
+
+    return min_reflection_dist
+
+
 def fram_brir(
     target_sr: int,
     t60: float,
@@ -89,11 +126,24 @@ def fram_brir(
         reflect_coef
     )
 
+    first_reflection_dist = dist_first_order_reflection(src_pos, mic_pos, room_dim)
+
+    shortest_path_safe_check = torch.max(first_reflection_dist, direct_dist + 0.001)
+    print(shortest_path_safe_check)
+
+    min_dist_ratio = shortest_path_safe_check / direct_dist
+
+    print(min_dist_ratio)
+
     # Distances
     dist_range = torch.linspace(
-        1.0, velocity * t60 / direct_dist - 1, int(hrir_sr * t60), device=device
+        min_dist_ratio,
+        velocity * t60 / direct_dist - 1,
+        int(hrir_sr * t60),
+        device=device,
     )
-    dist_prob = torch.linspace(0, 1.0, int(hrir_sr * t60), device=device)
+    dist_prob = torch.linspace(0.001, 1.0, int(hrir_sr * t60), device=device)
+    dist_prob = dist_prob.pow(2)
     dist_prob /= dist_prob.sum()
     dist_select_idx = dist_prob.multinomial(num_samples=image_count, replacement=True)
     dist_nearest_ratio = dist_range[dist_select_idx]
@@ -105,8 +155,8 @@ def fram_brir(
     unit_3d = torch.stack(
         [
             torch.sin(ele) * torch.cos(azm),
-            torch.sin(ele) * torch.sin(azm),
             torch.cos(ele),
+            torch.sin(ele) * torch.sin(azm),
         ],
         -1,
     )
@@ -149,8 +199,8 @@ def fram_brir(
     uy = vec_mic_to_img[..., 1] / radius
     uz = vec_mic_to_img[..., 2] / radius
 
-    azm_of_arrival = torch.atan2(uy, ux)
-    ele_of_arrival = torch.asin(uz)
+    azm_of_arrival = torch.atan2(-ux, uz)
+    ele_of_arrival = torch.asin(uy)
 
     azm_degree = torch.rad2deg(azm_of_arrival)
     ele_degree = torch.rad2deg(ele_of_arrival)
@@ -175,7 +225,6 @@ def fram_brir(
     # Apply highpass filter to remove low-frequency noise and then downsample to target sample rate, just like original FRAM
     brir_high = highpass_biquad(brir_high, hrir_sr, 80.0)
     brir_final = downsampler(brir_high)
-
     return brir_final
 
 
