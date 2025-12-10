@@ -10,5 +10,6 @@
 !src/rirTensor.py
 !src/framRir.py
 !src/binauralSynth.py
+!src/occlusionFilter.py
 
 !LICENSE
