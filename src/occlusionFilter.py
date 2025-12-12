@@ -1,4 +1,5 @@
 import torch
+import torchaudio
 import torchaudio.functional as F_audio
 
 
@@ -38,7 +39,7 @@ def apply_occlusion(
     nyquist = sample_rate / 2
 
     target_gain = 10.0 ** (-max_attenuation_db / 20.0)
-    fc = nyquist / torch.sqrt((1 / target_gain**2) - 1)
+    fc = nyquist / torch.sqrt(torch.tensor((1 / target_gain**2) - 1))
 
     waveform = F_audio.lowpass_biquad(
         waveform,
@@ -137,3 +138,26 @@ def batch_occlusion(
 #     h = h * window
 
 #     return final_db
+
+
+if "__main__" == __name__:
+    import torch
+
+    max_attenuation_db = 25
+    base_attenuation_db = 10
+    crit_freq_hz = 1000
+    crit_width_hz = 1000.0
+    attenuation_dip_strength_db = 5.0
+
+    waveform, sr = torchaudio.load("waveforms/hegrenade_detonate_02.wav")
+    waveform = waveform / waveform.abs().max()
+    occluded_waveforms = apply_occlusion(
+        waveform,
+        sr,
+        max_attenuation_db=max_attenuation_db,
+        base_attenuation_db=base_attenuation_db,
+        crit_freq_hz=crit_freq_hz,
+        crit_width_hz=crit_width_hz,
+        attenuation_dip_strength_db=attenuation_dip_strength_db,
+    )
+    torchaudio.save("output.wav", occluded_waveforms, sr)
