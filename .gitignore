@@ -11,5 +11,6 @@
 !src/framRir.py
 !src/binauralSynth.py
 !src/occlusionFilter.py
+!src/batchFramRir.py
 
 !LICENSE

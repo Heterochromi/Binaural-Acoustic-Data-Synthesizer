@@ -17,7 +17,7 @@ class RIRTensor:
         self,
         data: torch.Tensor,
         source_positions: torch.Tensor = None,
-        device: Literal["cpu", "cuda"] = "cpu",
+        device: torch.device = torch.device("cpu"),
     ):
         """
         Initialize HRIR tensor wrapper.

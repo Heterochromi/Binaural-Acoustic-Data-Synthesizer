@@ -7,7 +7,7 @@ GITHUB: https://github.com/tencent-ailab/FRA-RIR/blob/main/FRAM_RIR.py
 CITATION: Luo, Y., & Gu, R. (2024, April). Fast random approximation of multi-channel room impulse response. In 2024 IEEE International Conference on Acoustics, Speech, and Signal Processing Workshops (ICASSPW) (pp. 449-454). IEEE.
 """
 
-from typing import Literal, Tuple
+from typing import Tuple
 
 import torch
 from torch import Tensor

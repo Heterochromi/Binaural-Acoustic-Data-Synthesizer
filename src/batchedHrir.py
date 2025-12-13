@@ -39,7 +39,7 @@ class BatchedHRIR:
         ] = "auto",
         verbose: bool = False,
         batch_size: int = 32,
-        device: Literal["cpu", "cuda"] = "cpu",
+        device: torch.device = torch.device("cpu"),
     ):
         """
         Args:

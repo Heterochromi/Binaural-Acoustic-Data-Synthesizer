@@ -6,11 +6,12 @@ import torchaudio.functional as F_audio
 def apply_occlusion(
     waveform: torch.Tensor,
     sample_rate: int,
-    base_attenuation_db: float = 15.0,
+    base_attenuation_db: float = 10.0,
     max_attenuation_db: float = 40.0,
     crit_freq_hz: float = 1500.0,
     crit_width_hz: float = 1000.0,
-    attenuation_dip_strength_db: float = 15.0,
+    attenuation_dip_strength_db: float = 5.0,
+    device: torch.device = torch.device("cpu"),
 ):
     """
     This is a simple audio occlusion filter that tries to mimic real world single panel sound transmission loss.
@@ -23,6 +24,7 @@ def apply_occlusion(
         crit_freq_hz (float): Critical frequency in Hz.
         crit_width_hz (float): Critical width in Hz.
         attenuation_dip_strength_db (float): Attenuation dip strength in decibels.
+        device (torch.device): Device to run the computation on.
 
     Returns:
         torch.Tensor: Filtered audio waveform.
@@ -32,6 +34,7 @@ def apply_occlusion(
         ValueError(
             "for a realistic range max attenuation must be at least twice the base attenuation"
         )
+    waveform = waveform.to(device)
 
     base_gain = 10.0 ** (-base_attenuation_db / 20.0)
     waveform = waveform * base_gain
@@ -58,26 +61,6 @@ def apply_occlusion(
     )
 
     return waveform
-
-
-def batch_occlusion(
-    waveforms,
-    sample_rate,
-    max_attenuation_db,
-    base_attenuation_db,
-    crit_freq_hz,
-    crit_width_hz,
-    dip_strength_db,
-):
-    torch.vmap(apply_occlusion, in_dims=(0, None, 0, 0, 0, 0, 0))(
-        waveforms,
-        sample_rate,
-        max_attenuation_db,
-        base_attenuation_db,
-        crit_freq_hz,
-        crit_width_hz,
-        dip_strength_db,
-    )
 
 
 # def apply_occlusion(
