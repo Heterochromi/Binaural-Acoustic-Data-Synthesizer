@@ -4,63 +4,73 @@ import torchaudio.functional as F_audio
 
 
 def apply_occlusion(
-    waveform: torch.Tensor,
+    waveforms: torch.Tensor,  # [B, T]
     sample_rate: int,
     base_attenuation_db: float = 10.0,
     max_attenuation_db: float = 40.0,
     crit_freq_hz: float = 1500.0,
     crit_width_hz: float = 1000.0,
     attenuation_dip_strength_db: float = 5.0,
+    probability: float = 1,
     device: torch.device = torch.device("cpu"),
 ):
     """
     This is a simple audio occlusion filter that tries to mimic real world single panel sound transmission loss.
 
     Args:
-        waveform (torch.Tensor): Input audio waveform.
+        waveforms (torch.Tensor): Input audio waveforms.
         sample_rate (int): Sample rate of the audio signal.
         base_attenuation_db (float): Base attenuation in decibels.
         max_attenuation_db (float): Maximum attenuation in decibels.
         crit_freq_hz (float): Critical frequency in Hz.
         crit_width_hz (float): Critical width in Hz.
         attenuation_dip_strength_db (float): Attenuation dip strength in decibels.
+        probability (float): Probability of applying occlusion per waveform.
         device (torch.device): Device to run the computation on.
 
     Returns:
         torch.Tensor: Filtered audio waveform.
     """
+    if probability < 0 or probability > 1:
+        raise ValueError("probability must be between 0 and 1")
 
-    if base_attenuation_db * 2 < max_attenuation_db:
-        ValueError(
-            "for a realistic range max attenuation must be at least twice the base attenuation"
-        )
-    waveform = waveform.to(device)
+    waveforms = waveforms.to(device)
+    original_waveforms = waveforms.clone()
+
+    # Create mask for which waveforms to apply occlusion to [B, 1]
+    batch_size = waveforms.shape[0] if waveforms.dim() > 1 else 1
+    apply_mask = (
+        (torch.rand(batch_size, device=device) < probability).float().unsqueeze(-1)
+    )
 
     base_gain = 10.0 ** (-base_attenuation_db / 20.0)
-    waveform = waveform * base_gain
+    waveforms = waveforms * base_gain
 
     nyquist = sample_rate / 2
 
     target_gain = 10.0 ** (-max_attenuation_db / 20.0)
     fc = nyquist / torch.sqrt(torch.tensor((1 / target_gain**2) - 1))
 
-    waveform = F_audio.lowpass_biquad(
-        waveform,
+    waveforms = F_audio.lowpass_biquad(
+        waveforms,
         sample_rate,
         cutoff_freq=fc,
         Q=0.5,
     )
 
     Q_factor = crit_freq_hz / crit_width_hz
-    waveform = F_audio.equalizer_biquad(
-        waveform,
+    waveforms = F_audio.equalizer_biquad(
+        waveforms,
         sample_rate,
         center_freq=crit_freq_hz,
         gain=attenuation_dip_strength_db,
         Q=Q_factor,
     )
 
-    return waveform
+    # Blend between original and processed based on mask
+    waveforms = apply_mask * waveforms + (1 - apply_mask) * original_waveforms
+
+    return waveforms
 
 
 # def apply_occlusion(

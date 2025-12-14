@@ -115,6 +115,16 @@ def batch_fram_brir(
     if n_reflection is None:
         n_reflection = torch.tensor([[100, 500]], device=device)
 
+    if (
+        mic_pos.shape[0] != room_dim.shape[0]
+        or mic_pos.shape[0] != src_pos.shape[0]
+        or mic_pos.shape[0] != n_reflection.shape[0]
+        or mic_pos.shape[0] != t60.shape[0]
+    ):
+        raise ValueError(
+            "mic_pos, room_dim, src_pos, t60, and n_reflection must have the same batch size"
+        )
+
     # Move tensors to device
     mic_pos = mic_pos.to(device).float()
     src_pos = src_pos.to(device).float()
