@@ -1,6 +1,7 @@
-import torch
-from typing import Tuple, Optional, Literal, Union
+from typing import Literal, Tuple, Union
+
 import sofar as sf
+import torch
 from torch_geometric.transforms import Delaunay
 
 
@@ -12,7 +13,12 @@ class RIRTensor:
     PyTorch tensor performance with full GPU acceleration.
     """
 
-    def __init__(self, data: torch.Tensor, source_positions: torch.Tensor = None, device: str = 'cpu'):
+    def __init__(
+        self,
+        data: torch.Tensor,
+        source_positions: torch.Tensor = None,
+        device: torch.device = torch.device("cpu"),
+    ):
         """
         Initialize HRIR tensor wrapper.
 
@@ -58,7 +64,9 @@ class RIRTensor:
         self.elevations = self.source_positions[:, 1]  # Shape: (num_positions,)
 
         # Create available angles tensor for vectorized operations
-        self.available_angles = torch.stack([self.azimuths, self.elevations], dim=1)  # (num_positions, 2)
+        self.available_angles = torch.stack(
+            [self.azimuths, self.elevations], dim=1
+        )  # (num_positions, 2)
 
     def _build_delaunay_triangulation(self):
         """Build Delaunay triangulation for 3D spherical interpolation."""
@@ -70,13 +78,13 @@ class RIRTensor:
         # Convert spherical coordinates to 2D for triangulation
         # Handle angle wrapping by using coordinates in [-180, 180] range
         azimuths_wrapped = torch.where(
-            self.azimuths > 180,
-            self.azimuths - 360,
-            self.azimuths
+            self.azimuths > 180, self.azimuths - 360, self.azimuths
         )
 
         # Create 2D points for Delaunay: [azimuth, elevation]
-        points_2d = torch.stack([azimuths_wrapped, self.elevations], dim=1)  # (num_positions, 2)
+        points_2d = torch.stack(
+            [azimuths_wrapped, self.elevations], dim=1
+        )  # (num_positions, 2)
         self.delaunay_points = points_2d
 
         # Use torch_geometric's Delaunay transform
@@ -91,7 +99,7 @@ class RIRTensor:
             data_with_faces = delaunay_transform(data)
 
             # Store the triangulation (face indices)
-            if hasattr(data_with_faces, 'face'):
+            if hasattr(data_with_faces, "face"):
                 self.triangles = data_with_faces.face.t()  # Shape: (num_triangles, 3)
             else:
                 # Fallback if no triangulation possible
@@ -101,14 +109,16 @@ class RIRTensor:
             self.triangles = None
 
     @classmethod
-    def from_sofa(cls, sofa_path: str, device: Literal['cpu', 'cuda'] = 'cpu') -> 'RIRTensor':
+    def from_sofa(
+        cls, sofa_path: str, device: Literal["cpu", "cuda"] = "cpu"
+    ) -> "RIRTensor":
         """Load HRIR from SOFA file."""
         sofa_obj = sf.read_sofa(sofa_path)
 
         # Extract IR data
-        if hasattr(sofa_obj, 'Data_IR'):
+        if hasattr(sofa_obj, "Data_IR"):
             ir_data = sofa_obj.Data_IR
-        elif hasattr(sofa_obj, 'data'):
+        elif hasattr(sofa_obj, "data"):
             ir_data = sofa_obj.data
         else:
             raise ValueError("Cannot find IR data in SOFA object")
@@ -118,12 +128,14 @@ class RIRTensor:
 
         # Extract source positions if available
         source_positions = None
-        if hasattr(sofa_obj, 'SourcePosition'):
+        if hasattr(sofa_obj, "SourcePosition"):
             source_positions = torch.from_numpy(sofa_obj.SourcePosition).float()
 
         return cls(tensor, source_positions, device=device)
 
-    def _spherical_to_cartesian_batch(self, azimuth: torch.Tensor, elevation: torch.Tensor) -> torch.Tensor:
+    def _spherical_to_cartesian_batch(
+        self, azimuth: torch.Tensor, elevation: torch.Tensor
+    ) -> torch.Tensor:
         """
         Convert azimuth and elevation to cartesian coordinates (vectorized).
 
@@ -162,8 +174,13 @@ class RIRTensor:
 
         return torch.stack([azimuth, elevation], dim=-1)
 
-    def _get_angle_distance_batch(self, azimuth1: torch.Tensor, elevation1: torch.Tensor,
-                                   azimuth2: torch.Tensor, elevation2: torch.Tensor) -> torch.Tensor:
+    def _get_angle_distance_batch(
+        self,
+        azimuth1: torch.Tensor,
+        elevation1: torch.Tensor,
+        azimuth2: torch.Tensor,
+        elevation2: torch.Tensor,
+    ) -> torch.Tensor:
         """
         Calculate angular distance between two directions using cartesian conversion (vectorized).
 
@@ -178,7 +195,9 @@ class RIRTensor:
         point2 = self._spherical_to_cartesian_batch(azimuth2, elevation2)
         return torch.norm(point1 - point2, dim=-1)
 
-    def _find_nearest_direction_batch(self, azimuth: torch.Tensor, elevation: torch.Tensor) -> torch.Tensor:
+    def _find_nearest_direction_batch(
+        self, azimuth: torch.Tensor, elevation: torch.Tensor
+    ) -> torch.Tensor:
         """
         Find the index of the nearest spatial direction for each query (vectorized).
 
@@ -205,15 +224,15 @@ class RIRTensor:
 
         # Calculate distances: (batch_size, num_positions)
         distances = self._get_angle_distance_batch(
-            azimuth_expanded, elevation_expanded,
-            available_az, available_el
+            azimuth_expanded, elevation_expanded, available_az, available_el
         )
 
         # Return index of nearest position for each query
         return torch.argmin(distances, dim=1)  # (batch_size,)
 
-    def _angle_exists_batch(self, azimuth: torch.Tensor, elevation: torch.Tensor,
-                           tolerance: float = 0.001) -> torch.Tensor:
+    def _angle_exists_batch(
+        self, azimuth: torch.Tensor, elevation: torch.Tensor, tolerance: float = 0.001
+    ) -> torch.Tensor:
         """
         Check if exact angles exist in dataset (vectorized).
 
@@ -241,8 +260,9 @@ class RIRTensor:
         matches = az_match & el_match
         return torch.any(matches, dim=1)  # (batch_size,)
 
-    def _get_angle_index_batch(self, azimuth: torch.Tensor, elevation: torch.Tensor,
-                               tolerance: float = 0.001) -> torch.Tensor:
+    def _get_angle_index_batch(
+        self, azimuth: torch.Tensor, elevation: torch.Tensor, tolerance: float = 0.001
+    ) -> torch.Tensor:
         """
         Get the index for specific angles (vectorized).
 
@@ -273,7 +293,9 @@ class RIRTensor:
 
         return indices
 
-    def _get_hrir_at_index_batch(self, idx: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _get_hrir_at_index_batch(
+        self, idx: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Get HRIR at specific indices (vectorized).
 
@@ -285,7 +307,9 @@ class RIRTensor:
         """
         return self.data[idx, 0], self.data[idx, 1]
 
-    def _find_containing_triangles_batch(self, azimuth: torch.Tensor, elevation: torch.Tensor) -> torch.Tensor:
+    def _find_containing_triangles_batch(
+        self, azimuth: torch.Tensor, elevation: torch.Tensor
+    ) -> torch.Tensor:
         """
         Find which Delaunay triangle contains each query point (vectorized).
 
@@ -303,11 +327,7 @@ class RIRTensor:
         batch_size = azimuth.shape[0]
 
         # Wrap azimuths to [-180, 180] to match delaunay_points
-        azimuth_wrapped = torch.where(
-            azimuth > 180,
-            azimuth - 360,
-            azimuth
-        )
+        azimuth_wrapped = torch.where(azimuth > 180, azimuth - 360, azimuth)
 
         # Query points in 2D: (batch_size, 2)
         query_points = torch.stack([azimuth_wrapped, elevation], dim=1)
@@ -320,7 +340,9 @@ class RIRTensor:
             query = query_points[i]  # (2,)
 
             # Get all triangle vertices
-            triangle_verts = self.delaunay_points[self.triangles]  # (num_triangles, 3, 2)
+            triangle_verts = self.delaunay_points[
+                self.triangles
+            ]  # (num_triangles, 3, 2)
 
             # Compute barycentric coordinates for all triangles
             # For triangle with vertices v0, v1, v2 and point p:
@@ -343,10 +365,14 @@ class RIRTensor:
             w1 = torch.zeros_like(denom)
             w2 = torch.zeros_like(denom)
 
-            w1[valid_triangles] = (v0_to_p[valid_triangles, 0] * v0_to_v2[valid_triangles, 1] -
-                                   v0_to_p[valid_triangles, 1] * v0_to_v2[valid_triangles, 0]) / denom[valid_triangles]
-            w2[valid_triangles] = (v0_to_v1[valid_triangles, 0] * v0_to_p[valid_triangles, 1] -
-                                   v0_to_v1[valid_triangles, 1] * v0_to_p[valid_triangles, 0]) / denom[valid_triangles]
+            w1[valid_triangles] = (
+                v0_to_p[valid_triangles, 0] * v0_to_v2[valid_triangles, 1]
+                - v0_to_p[valid_triangles, 1] * v0_to_v2[valid_triangles, 0]
+            ) / denom[valid_triangles]
+            w2[valid_triangles] = (
+                v0_to_v1[valid_triangles, 0] * v0_to_p[valid_triangles, 1]
+                - v0_to_v1[valid_triangles, 1] * v0_to_p[valid_triangles, 0]
+            ) / denom[valid_triangles]
             w0 = 1.0 - w1 - w2
 
             # Check if point is inside triangle (all barycentric coords in [0,1])
@@ -367,7 +393,9 @@ class RIRTensor:
         result = torch.stack(result_indices, dim=0)
         return result[:, 0], result[:, 1], result[:, 2]
 
-    def _get_planar_neighbours_batchrir_pathh(self, azimuth: torch.Tensor, elevation: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _get_planar_neighbours_batchrir_pathh(
+        self, azimuth: torch.Tensor, elevation: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Get nearest planar azimuth neighbours on the closest elevation plane (vectorized).
         Fallback method when Delaunay triangulation is not available.
@@ -418,12 +446,18 @@ class RIRTensor:
 
             indices_list.append([idx1, idx2, idx3])
 
-        indices_tensor = torch.tensor(indices_list, device=self.device)  # (batch_size, 3)
+        indices_tensor = torch.tensor(
+            indices_list, device=self.device
+        )  # (batch_size, 3)
         return indices_tensor[:, 0], indices_tensor[:, 1], indices_tensor[:, 2]
 
-    def angle_batch(self, azimuth: torch.Tensor, elevation: torch.Tensor,
-                   mode: Literal["auto", "nearest", "two_point", "three_point"] = "auto",
-                   distance_threshold: float = 0.035) -> Tuple[torch.Tensor, torch.Tensor]:
+    def angle_batch(
+        self,
+        azimuth: torch.Tensor,
+        elevation: torch.Tensor,
+        mode: Literal["auto", "nearest", "two_point", "three_point"] = "auto",
+        distance_threshold: float = 0.035,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Get HRIR for multiple directions with interpolation (fully vectorized).
 
@@ -446,16 +480,20 @@ class RIRTensor:
         batch_size = azimuth.shape[0]
 
         # Ensure tensors are on correct device
-        azimuth = azimuth.to(self.device , dtype=self.dtype)
-        elevation = elevation.to(self.device , dtype=self.dtype)
+        azimuth = azimuth.to(self.device, dtype=self.dtype)
+        elevation = elevation.to(self.device, dtype=self.dtype)
 
         # Normalize angles
         azimuth = (azimuth + 360) % 360
         elevation = torch.clamp(elevation, -90, 90)
 
         # Initialize output tensors
-        left_output = torch.zeros(batch_size, self.tap_length, device=self.device , dtype=self.dtype)
-        right_output = torch.zeros(batch_size, self.tap_length, device=self.device , dtype=self.dtype)
+        left_output = torch.zeros(
+            batch_size, self.tap_length, device=self.device, dtype=self.dtype
+        )
+        right_output = torch.zeros(
+            batch_size, self.tap_length, device=self.device, dtype=self.dtype
+        )
 
         if mode == "nearest":
             # Simple nearest neighbor for all
@@ -475,7 +513,9 @@ class RIRTensor:
         nearest_idx = self._find_nearest_direction_batch(azimuth, elevation)
         nearest_az = self.azimuths[nearest_idx]
         nearest_el = self.elevations[nearest_idx]
-        nearest_dist = self._get_angle_distance_batch(azimuth, elevation, nearest_az, nearest_el)
+        nearest_dist = self._get_angle_distance_batch(
+            azimuth, elevation, nearest_az, nearest_el
+        )
 
         # Determine which need interpolation
         if mode == "auto":
@@ -488,7 +528,9 @@ class RIRTensor:
         if torch.any(use_nearest):
             idx_nearest = torch.where(use_nearest)[0]
             nearest_for_output = nearest_idx[idx_nearest]
-            left_nearest, right_nearest = self._get_hrir_at_index_batch(nearest_for_output)
+            left_nearest, right_nearest = self._get_hrir_at_index_batch(
+                nearest_for_output
+            )
             left_output[idx_nearest] = left_nearest
             right_output[idx_nearest] = right_nearest
 
@@ -501,9 +543,13 @@ class RIRTensor:
             # Get three nearest neighbors for interpolation
             # Use Delaunay triangulation if available, otherwise fall back to planar
             if self.triangles is not None:
-                idx1, idx2, idx3 = self._find_containing_triangles_batch(az_interp, el_interp)
+                idx1, idx2, idx3 = self._find_containing_triangles_batch(
+                    az_interp, el_interp
+                )
             else:
-                idx1, idx2, idx3 = self._get_planar_neighbours_batch(az_interp, el_interp)
+                idx1, idx2, idx3 = self._get_planar_neighbours_batch(
+                    az_interp, el_interp
+                )
 
             # Get angles for the three points
             az1, el1 = self.azimuths[idx1], self.elevations[idx1]
@@ -544,12 +590,16 @@ class RIRTensor:
                 left2, right2 = self.data[idx2, 0], self.data[idx2, 1]
                 left3, right3 = self.data[idx3, 0], self.data[idx3, 1]
 
-                left_interp = (w1.unsqueeze(1) * left1 +
-                              w2.unsqueeze(1) * left2 +
-                              w3.unsqueeze(1) * left3)
-                right_interp = (w1.unsqueeze(1) * right1 +
-                               w2.unsqueeze(1) * right2 +
-                               w3.unsqueeze(1) * right3)
+                left_interp = (
+                    w1.unsqueeze(1) * left1
+                    + w2.unsqueeze(1) * left2
+                    + w3.unsqueeze(1) * left3
+                )
+                right_interp = (
+                    w1.unsqueeze(1) * right1
+                    + w2.unsqueeze(1) * right2
+                    + w3.unsqueeze(1) * right3
+                )
 
             # Store interpolated results
             interp_indices = torch.where(interp_mask)[0]
@@ -558,8 +608,12 @@ class RIRTensor:
 
         return left_output, right_output
 
-    def angle(self, azimuth: float, elevation: float,
-              mode: Literal["auto", "nearest", "two_point", "three_point"] = "auto") -> Tuple[torch.Tensor, torch.Tensor]:
+    def angle(
+        self,
+        azimuth: float,
+        elevation: float,
+        mode: Literal["auto", "nearest", "two_point", "three_point"] = "auto",
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Get HRIR for a single direction (convenience wrapper for batch method).
 
@@ -571,8 +625,10 @@ class RIRTensor:
         Returns:
             Tuple of (left_channel, right_channel) tensors of shape (tap_length,)
         """
-        azimuth_tensor = torch.tensor([azimuth], device=self.device , dtype=self.dtype)
-        elevation_tensor = torch.tensor([elevation], device=self.device , dtype=self.dtype)
+        azimuth_tensor = torch.tensor([azimuth], device=self.device, dtype=self.dtype)
+        elevation_tensor = torch.tensor(
+            [elevation], device=self.device, dtype=self.dtype
+        )
 
         left, right = self.angle_batch(azimuth_tensor, elevation_tensor, mode=mode)
 
@@ -593,12 +649,14 @@ class RIRTensor:
         """Get shape of HRIR tensor."""
         return self.data.shape
 
-    def to(self, device: Union[str, torch.device]) -> 'RIRTensor':
+    def to(self, device: Union[str, torch.device]) -> "RIRTensor":
         """Move all tensors to specified device."""
         self.device = torch.device(device)
-        self.data = self.data.to(self.device , dtype=self.dtype)
+        self.data = self.data.to(self.device, dtype=self.dtype)
         if self.source_positions is not None:
-            self.source_positions = self.source_positions.to(self.device , dtype=self.dtype)
+            self.source_positions = self.source_positions.to(
+                self.device, dtype=self.dtype
+            )
             self._build_spatial_index()
             self._build_delaunay_triangulation()
         return self
@@ -621,14 +679,22 @@ class HRIRChannel:
         self.parent = parent
         self.channel_idx = channel_idx
 
-    def angle(self, azimuth: float, elevation: float,
-              mode: Literal["auto", "nearest", "two_point", "three_point"] = "auto") -> torch.Tensor:
+    def angle(
+        self,
+        azimuth: float,
+        elevation: float,
+        mode: Literal["auto", "nearest", "two_point", "three_point"] = "auto",
+    ) -> torch.Tensor:
         """Get HRIR for a specific direction for this channel."""
         left, right = self.parent.angle(azimuth, elevation, mode=mode)
         return left if self.channel_idx == 0 else right
 
-    def angle_batch(self, azimuth: torch.Tensor, elevation: torch.Tensor,
-                   mode: Literal["auto", "nearest", "two_point", "three_point"] = "auto") -> torch.Tensor:
+    def angle_batch(
+        self,
+        azimuth: torch.Tensor,
+        elevation: torch.Tensor,
+        mode: Literal["auto", "nearest", "two_point", "three_point"] = "auto",
+    ) -> torch.Tensor:
         """Get HRIR for multiple directions for this channel."""
         left, right = self.parent.angle_batch(azimuth, elevation, mode=mode)
         return left if self.channel_idx == 0 else right
