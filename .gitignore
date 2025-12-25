@@ -5,7 +5,7 @@
 
 !.gitignore
 
-
+!src/__init__.py
 !src/batchedHrir.py
 !src/rirTensor.py
 !src/framRir.py
