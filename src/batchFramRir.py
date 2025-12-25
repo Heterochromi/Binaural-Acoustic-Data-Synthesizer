@@ -113,7 +113,7 @@ def batch_fram_brir(
     if src_pos is None:
         src_pos = torch.tensor([[1.0, 1.0, 1.0]], device=device)
     if n_reflection is None:
-        n_reflection = torch.tensor([[100, 500]], device=device)
+        n_reflection = torch.tensor([[100, 700]], device=device)
 
     if (
         mic_pos.shape[0] != room_dim.shape[0]
@@ -397,52 +397,5 @@ def batch_fram_brir(
     # Resample expects (..., time) format
     brir_final = downsampler(brir_high)
 
-    # Compute final RIR lengths for each batch after downsampling
-    # rir_length_final = int(target_sr * t60) for each batch
-    # For now, return the full tensor; caller can trim if needed based on t60
-
-    return brir_final
-
-
-def batch_fram_brir_variable_length(
-    target_sr: int,
-    t60: Tensor,
-    h_rir: RIRTensor,
-    hrir_sr: int = 96000,
-    mic_pos: Tensor = None,
-    room_dim: Tensor = None,
-    src_pos: Tensor = None,
-    n_reflection: Tensor = None,
-    a: float = -2.0,
-    b: float = 2.0,
-    tau: float = 0.25,
-    device: torch.device = torch.device("cpu"),
-) -> Tuple[Tensor, Tensor]:
-    """
-    Same as batch_fram_brir but also returns the valid lengths for each batch element.
-
-    Returns:
-        Tuple[Tensor, Tensor]:
-            - brir_final: Batched BRIRs, shape (B, 2, max_rir_length)
-            - valid_lengths: Valid length for each batch element, shape (B,)
-    """
-    brir_final = batch_fram_brir(
-        target_sr=target_sr,
-        t60=t60,
-        h_rir=h_rir,
-        hrir_sr=hrir_sr,
-        mic_pos=mic_pos,
-        room_dim=room_dim,
-        src_pos=src_pos,
-        n_reflection=n_reflection,
-        a=a,
-        b=b,
-        tau=tau,
-        device=device,
-    )
-
-    # Compute valid lengths based on t60
-    t60 = t60.to(device)
-    valid_lengths = (target_sr * t60).long()
-
-    return brir_final, valid_lengths
+    valid_after_dry = (target_sr * t60).long()
+    return brir_final, valid_after_dry

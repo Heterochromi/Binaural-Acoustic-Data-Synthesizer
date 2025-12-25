@@ -30,6 +30,7 @@ def apply_occlusion(
 
     Returns:
         torch.Tensor: Filtered audio waveform.
+        torch.Tensor: Mask indicating which waveforms were occluded.
     """
     if probability < 0 or probability > 1:
         raise ValueError("probability must be between 0 and 1")
@@ -42,7 +43,6 @@ def apply_occlusion(
     apply_mask = (
         (torch.rand(batch_size, device=device) < probability).float().unsqueeze(-1)
     )
-
     base_gain = 10.0 ** (-base_attenuation_db / 20.0)
     waveforms = waveforms * base_gain
 
@@ -70,7 +70,7 @@ def apply_occlusion(
     # Blend between original and processed based on mask
     waveforms = apply_mask * waveforms + (1 - apply_mask) * original_waveforms
 
-    return waveforms
+    return waveforms, apply_mask.squeeze(1)
 
 
 # def apply_occlusion(
