@@ -189,51 +189,11 @@ class RIRTensor:
 
         return torch.stack([x, y, z], dim=-1)
 
-    def _cartesian_to_spherical_batch(self, xyz: torch.Tensor) -> torch.Tensor:
-        """
-        Convert cartesian coordinates to azimuth and elevation (vectorized).
-
-        Args:
-            xyz: Tensor of shape (batch_size, 3) with [x, y, z]
-
-        Returns:
-            Tensor of shape (batch_size, 2) with [azimuth, elevation] in degrees
-        """
-        x, y, z = xyz[..., 0], xyz[..., 1], xyz[..., 2]
-
-        azimuth = torch.rad2deg(torch.atan2(y, x))
-        elevation = torch.rad2deg(torch.atan2(z, torch.sqrt(x**2 + y**2)))
-
-        azimuth = (azimuth + 360) % 360
-
-        return torch.stack([azimuth, elevation], dim=-1)
-
-    def _get_angle_distance_batch(
-        self,
-        azimuth1: torch.Tensor,
-        elevation1: torch.Tensor,
-        azimuth2: torch.Tensor,
-        elevation2: torch.Tensor,
-    ) -> torch.Tensor:
-        """
-        Calculate angular distance between two directions using cartesian conversion (vectorized).
-
-        Args:
-            azimuth1, elevation1: Query angles, shape (batch_size,)
-            azimuth2, elevation2: Reference angles, shape (batch_size,) or (num_positions,)
-
-        Returns:
-            Distances, shape depends on broadcasting
-        """
-        point1 = self._spherical_to_cartesian_batch(azimuth1, elevation1)
-        point2 = self._spherical_to_cartesian_batch(azimuth2, elevation2)
-        return torch.norm(point1 - point2, dim=-1)
-
     def _find_nearest_direction_batch(
         self, azimuth: torch.Tensor, elevation: torch.Tensor
     ) -> torch.Tensor:
         """
-        Find the index of the nearest spatial direction for each query (chunked for memory efficiency).
+        Find the index of the nearest spatial direction for each query.
 
         Args:
             azimuth: Tensor of shape (batch_size,)
@@ -245,15 +205,9 @@ class RIRTensor:
         if self.source_positions is None:
             raise ValueError("No spatial position data available")
 
-        batch_size = azimuth.shape[0]
-
         # Normalize angles (clone to avoid modifying input, then use in-place)
         azimuth = azimuth.clone().remainder_(360)
         elevation = elevation.clone().clamp_(-90, 90)
-
-        # Process in chunks to avoid memory explosion
-        chunk_size = 1024
-        result_indices = torch.empty(batch_size, dtype=torch.long, device=self.device)
 
         # Convert query points to cartesian coordinates
         query_xyz = self._spherical_to_cartesian_batch(
@@ -263,69 +217,15 @@ class RIRTensor:
         # Transpose cartesian positions for matrix multiplication: (3, num_positions)
         available_xyz_t = self.cartesian_positions.t()
 
-        for chunk_start in range(0, batch_size, chunk_size):
-            chunk_end = min(chunk_start + chunk_size, batch_size)
-            chunk_query = query_xyz[chunk_start:chunk_end]  # (chunk_size, 3)
+        # Calculate dot products: (batch_size, num_positions)
+        # Since vectors are unit length, dot product is cosine similarity
+        # Max dot product corresponds to min distance (and max similarity)
+        dot_products = torch.matmul(query_xyz, available_xyz_t)
 
-            # Calculate dot products: (chunk_size, num_positions)
-            # Since vectors are unit length, dot product is cosine similarity
-            # Max dot product corresponds to min distance (and max similarity)
-            dot_products = torch.matmul(chunk_query, available_xyz_t)
-
-            # Get nearest index for this chunk
-            result_indices[chunk_start:chunk_end] = torch.argmax(dot_products, dim=1)
-
-            del dot_products
+        # Get nearest index
+        result_indices = torch.argmax(dot_products, dim=1)
 
         return result_indices
-
-    def _angle_exists_batch(
-        self, azimuth: torch.Tensor, elevation: torch.Tensor, tolerance: float = 0.001
-    ) -> torch.Tensor:
-        """
-        Check if exact angles exist in dataset using nearest neighbor search.
-
-        Args:
-            azimuth: Tensor of shape (batch_size,)
-            elevation: Tensor of shape (batch_size,)
-            tolerance: Angular tolerance in degrees
-
-        Returns:
-            Boolean tensor of shape (batch_size,)
-        """
-        azimuth = azimuth % 360
-        elevation = torch.clamp(elevation, -90, 90)
-
-        # Find nearest neighbors
-        nearest_idx = self._find_nearest_direction_batch(azimuth, elevation)
-
-        # Get angles of nearest neighbors
-        nearest_az = self.azimuths[nearest_idx]
-        nearest_el = self.elevations[nearest_idx]
-
-        # Check differences (handling wrapping for azimuth)
-        az_diff = (azimuth - nearest_az).abs_()
-        torch.minimum(az_diff, 360 - az_diff, out=az_diff)
-
-        el_diff = (elevation - nearest_el).abs_()
-
-        return (az_diff < tolerance) & (el_diff < tolerance)
-
-    def _get_angle_index_batch(
-        self, azimuth: torch.Tensor, elevation: torch.Tensor, tolerance: float = 0.001
-    ) -> torch.Tensor:
-        """
-        Get the index for specific angles using nearest neighbor search.
-
-        Args:
-            azimuth: Tensor of shape (batch_size,)
-            elevation: Tensor of shape (batch_size,)
-            tolerance: Angular tolerance in degrees
-
-        Returns:
-            Indices tensor of shape (batch_size,)
-        """
-        return self._find_nearest_direction_batch(azimuth, elevation)
 
     def _get_hrir_at_index_batch(
         self, idx: torch.Tensor
@@ -461,7 +361,7 @@ class RIRTensor:
         self, azimuth: torch.Tensor, elevation: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Get nearest planar azimuth neighbours on the closest elevation plane (chunked for memory efficiency).
+        Get nearest planar azimuth neighbours on the closest elevation plane.
         Fallback method when Delaunay triangulation is not available.
 
         Args:
@@ -471,58 +371,34 @@ class RIRTensor:
         Returns:
             Three tensors of indices, each of shape (batch_size,)
         """
-        batch_size = azimuth.shape[0]
         azimuth = azimuth.clone().add_(360).remainder_(360)
 
-        # Process in chunks to avoid memory explosion
-        # Each chunk creates tensors of shape (chunk_size, num_positions)
-        chunk_size = 1024
+        # Find nearest elevation for each query
+        el_diff = (self.elevations.unsqueeze(0) - elevation.unsqueeze(1)).abs_()
+        nearest_el_idx = torch.argmin(el_diff, dim=1)
+        nearest_el = self.elevations[nearest_el_idx]
 
-        idx1 = torch.empty(batch_size, dtype=torch.long, device=self.device)
-        idx2 = torch.empty(batch_size, dtype=torch.long, device=self.device)
-        idx3 = torch.empty(batch_size, dtype=torch.long, device=self.device)
+        # Calculate azimuth differences with wrapping
+        az_diff = self.azimuths.unsqueeze(0) - azimuth.unsqueeze(1)
+        # Wrap to [-180, 180] range in-place
+        az_diff[az_diff > 180] -= 360
+        az_diff[az_diff < -180] += 360
+        az_diff.abs_()
 
-        for chunk_start in range(0, batch_size, chunk_size):
-            chunk_end = min(chunk_start + chunk_size, batch_size)
-            chunk_az = azimuth[chunk_start:chunk_end]
-            chunk_el = elevation[chunk_start:chunk_end]
+        # Create elevation mask
+        el_tolerance = 0.1
+        el_mask = (
+            torch.abs(self.elevations.unsqueeze(0) - nearest_el.unsqueeze(1))
+            < el_tolerance
+        )
 
-            # Find nearest elevation for each query in chunk
-            el_diff = (self.elevations.unsqueeze(0) - chunk_el.unsqueeze(1)).abs_()
-            nearest_el_idx = torch.argmin(el_diff, dim=1)
-            nearest_el = self.elevations[nearest_el_idx]
+        # Set distance to infinity for positions not on the elevation plane (in-place)
+        az_diff[~el_mask] = float("inf")
 
-            del el_diff
+        # Get indices of 3 smallest distances
+        _, top3_idx = torch.topk(az_diff, k=3, dim=1, largest=False)
 
-            # Calculate azimuth differences with wrapping
-            az_diff = self.azimuths.unsqueeze(0) - chunk_az.unsqueeze(1)
-            # Wrap to [-180, 180] range in-place
-            az_diff[az_diff > 180] -= 360
-            az_diff[az_diff < -180] += 360
-            az_diff.abs_()
-
-            # Create elevation mask
-            el_tolerance = 0.1
-            el_mask = (
-                torch.abs(self.elevations.unsqueeze(0) - nearest_el.unsqueeze(1))
-                < el_tolerance
-            )
-
-            # Set distance to infinity for positions not on the elevation plane (in-place)
-            az_diff[~el_mask] = float("inf")
-
-            del el_mask
-
-            # Get indices of 3 smallest distances
-            _, top3_local_idx = torch.topk(az_diff, k=3, dim=1, largest=False)
-
-            del az_diff
-
-            idx1[chunk_start:chunk_end] = top3_local_idx[:, 0]
-            idx2[chunk_start:chunk_end] = top3_local_idx[:, 1]
-            idx3[chunk_start:chunk_end] = top3_local_idx[:, 2]
-
-        return idx1, idx2, idx3
+        return top3_idx[:, 0], top3_idx[:, 1], top3_idx[:, 2]
 
     def angle_batch(
         self,
