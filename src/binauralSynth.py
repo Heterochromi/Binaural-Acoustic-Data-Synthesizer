@@ -153,9 +153,11 @@ class BinauralSynth:
             crit_freq_hz=crit_freq_hz.item(),
             crit_width_hz=crit_width_hz.item(),
             attenuation_dip_strength_db=attenuation_dip_strength_db.item(),
-            probability=0.0,
-            device=self.device,
+            probability=0.5,
+            device=torch.device("cpu"),
         )
+        occluded_waveforms = occluded_waveforms.to(self.device)
+        occlusion_mask = occlusion_mask.to(self.device)
 
         room_dim_xz = (
             torch.empty(1, dtype=torch.float32).uniform_(6, 10).to(self.device)
