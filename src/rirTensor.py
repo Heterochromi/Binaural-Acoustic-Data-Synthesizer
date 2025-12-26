@@ -57,6 +57,7 @@ class RIRTensor:
             self.azimuths = None
             self.elevations = None
             self.available_angles = None
+            self.cartesian_positions = None
             return
 
         # Store azimuth and elevation separately for easier queries
@@ -67,6 +68,11 @@ class RIRTensor:
         self.available_angles = torch.stack(
             [self.azimuths, self.elevations], dim=1
         )  # (num_positions, 2)
+
+        # Precompute Cartesian coordinates for source positions (normalized)
+        self.cartesian_positions = self._spherical_to_cartesian_batch(
+            self.azimuths, self.elevations
+        )
 
     def _build_delaunay_triangulation(self):
         """Build Delaunay triangulation for 3D spherical interpolation."""
@@ -101,9 +107,37 @@ class RIRTensor:
             # Store the triangulation (face indices)
             if hasattr(data_with_faces, "face"):
                 self.triangles = data_with_faces.face.t()  # Shape: (num_triangles, 3)
+
+                # Build vertex-to-triangle adjacency list for optimized search
+                # Use CPU for construction to avoid complex scatter logic
+                triangles_cpu = self.triangles.cpu()
+                num_vertices = self.num_positions
+                vertex_to_tri = [[] for _ in range(num_vertices)]
+
+                for i in range(self.triangles.shape[0]):
+                    for j in range(3):
+                        v = triangles_cpu[i, j].item()
+                        vertex_to_tri[v].append(i)
+
+                max_degree = max(len(l) for l in vertex_to_tri) if vertex_to_tri else 0
+
+                # Create padded tensor
+                self.vertex_triangles = torch.full(
+                    (num_vertices, max_degree),
+                    -1,
+                    dtype=torch.long,
+                    device=self.device,
+                )
+
+                for i, l in enumerate(vertex_to_tri):
+                    if l:
+                        self.vertex_triangles[i, : len(l)] = torch.tensor(
+                            l, dtype=torch.long, device=self.device
+                        )
             else:
                 # Fallback if no triangulation possible
                 self.triangles = None
+                self.vertex_triangles = None
         except Exception as e:
             print(f"Warning: Could not build Delaunay triangulation: {e}")
             self.triangles = None
@@ -199,7 +233,7 @@ class RIRTensor:
         self, azimuth: torch.Tensor, elevation: torch.Tensor
     ) -> torch.Tensor:
         """
-        Find the index of the nearest spatial direction for each query (vectorized).
+        Find the index of the nearest spatial direction for each query (chunked for memory efficiency).
 
         Args:
             azimuth: Tensor of shape (batch_size,)
@@ -211,30 +245,45 @@ class RIRTensor:
         if self.source_positions is None:
             raise ValueError("No spatial position data available")
 
-        # Normalize angles
-        azimuth = azimuth % 360
-        elevation = torch.clamp(elevation, -90, 90)
+        batch_size = azimuth.shape[0]
 
-        # Expand dimensions for broadcasting: (batch_size, 1) vs (num_positions,)
-        azimuth_expanded = azimuth.unsqueeze(1)  # (batch_size, 1)
-        elevation_expanded = elevation.unsqueeze(1)  # (batch_size, 1)
+        # Normalize angles (clone to avoid modifying input, then use in-place)
+        azimuth = azimuth.clone().remainder_(360)
+        elevation = elevation.clone().clamp_(-90, 90)
 
-        available_az = self.azimuths.unsqueeze(0)  # (1, num_positions)
-        available_el = self.elevations.unsqueeze(0)  # (1, num_positions)
+        # Process in chunks to avoid memory explosion
+        chunk_size = 1024
+        result_indices = torch.empty(batch_size, dtype=torch.long, device=self.device)
 
-        # Calculate distances: (batch_size, num_positions)
-        distances = self._get_angle_distance_batch(
-            azimuth_expanded, elevation_expanded, available_az, available_el
-        )
+        # Convert query points to cartesian coordinates
+        query_xyz = self._spherical_to_cartesian_batch(
+            azimuth, elevation
+        )  # (batch_size, 3)
 
-        # Return index of nearest position for each query
-        return torch.argmin(distances, dim=1)  # (batch_size,)
+        # Transpose cartesian positions for matrix multiplication: (3, num_positions)
+        available_xyz_t = self.cartesian_positions.t()
+
+        for chunk_start in range(0, batch_size, chunk_size):
+            chunk_end = min(chunk_start + chunk_size, batch_size)
+            chunk_query = query_xyz[chunk_start:chunk_end]  # (chunk_size, 3)
+
+            # Calculate dot products: (chunk_size, num_positions)
+            # Since vectors are unit length, dot product is cosine similarity
+            # Max dot product corresponds to min distance (and max similarity)
+            dot_products = torch.matmul(chunk_query, available_xyz_t)
+
+            # Get nearest index for this chunk
+            result_indices[chunk_start:chunk_end] = torch.argmax(dot_products, dim=1)
+
+            del dot_products
+
+        return result_indices
 
     def _angle_exists_batch(
         self, azimuth: torch.Tensor, elevation: torch.Tensor, tolerance: float = 0.001
     ) -> torch.Tensor:
         """
-        Check if exact angles exist in dataset (vectorized).
+        Check if exact angles exist in dataset using nearest neighbor search.
 
         Args:
             azimuth: Tensor of shape (batch_size,)
@@ -245,26 +294,28 @@ class RIRTensor:
             Boolean tensor of shape (batch_size,)
         """
         azimuth = azimuth % 360
+        elevation = torch.clamp(elevation, -90, 90)
 
-        # Expand for broadcasting
-        azimuth_expanded = azimuth.unsqueeze(1)  # (batch_size, 1)
-        elevation_expanded = elevation.unsqueeze(1)  # (batch_size, 1)
+        # Find nearest neighbors
+        nearest_idx = self._find_nearest_direction_batch(azimuth, elevation)
 
-        available_az = self.azimuths.unsqueeze(0)  # (1, num_positions)
-        available_el = self.elevations.unsqueeze(0)  # (1, num_positions)
+        # Get angles of nearest neighbors
+        nearest_az = self.azimuths[nearest_idx]
+        nearest_el = self.elevations[nearest_idx]
 
-        # Check if any available angle matches within tolerance
-        az_match = torch.abs(available_az - azimuth_expanded) < tolerance
-        el_match = torch.abs(available_el - elevation_expanded) < tolerance
+        # Check differences (handling wrapping for azimuth)
+        az_diff = (azimuth - nearest_az).abs_()
+        torch.minimum(az_diff, 360 - az_diff, out=az_diff)
 
-        matches = az_match & el_match
-        return torch.any(matches, dim=1)  # (batch_size,)
+        el_diff = (elevation - nearest_el).abs_()
+
+        return (az_diff < tolerance) & (el_diff < tolerance)
 
     def _get_angle_index_batch(
         self, azimuth: torch.Tensor, elevation: torch.Tensor, tolerance: float = 0.001
     ) -> torch.Tensor:
         """
-        Get the index for specific angles (vectorized).
+        Get the index for specific angles using nearest neighbor search.
 
         Args:
             azimuth: Tensor of shape (batch_size,)
@@ -274,24 +325,7 @@ class RIRTensor:
         Returns:
             Indices tensor of shape (batch_size,)
         """
-        azimuth = azimuth % 360
-
-        # Expand for broadcasting
-        azimuth_expanded = azimuth.unsqueeze(1)  # (batch_size, 1)
-        elevation_expanded = elevation.unsqueeze(1)  # (batch_size, 1)
-
-        available_az = self.azimuths.unsqueeze(0)  # (1, num_positions)
-        available_el = self.elevations.unsqueeze(0)  # (1, num_positions)
-
-        # Find matches
-        az_match = torch.abs(available_az - azimuth_expanded) < tolerance
-        el_match = torch.abs(available_el - elevation_expanded) < tolerance
-        matches = az_match & el_match
-
-        # Get first matching index for each query
-        indices = torch.argmax(matches.float(), dim=1)
-
-        return indices
+        return self._find_nearest_direction_batch(azimuth, elevation)
 
     def _get_hrir_at_index_batch(
         self, idx: torch.Tensor
@@ -309,16 +343,16 @@ class RIRTensor:
 
     def _find_containing_triangles_batch(
         self, azimuth: torch.Tensor, elevation: torch.Tensor
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Find which Delaunay triangle contains each query point (vectorized).
+        Find which Delaunay triangle contains each query point using optimized adjacency search.
 
         Args:
             azimuth: Tensor of shape (batch_size,) in degrees
             elevation: Tensor of shape (batch_size,) in degrees
 
         Returns:
-            Tensor of shape (batch_size, 3) with indices of triangle vertices
+            Tuple of three tensors, each of shape (batch_size,) with indices of triangle vertices
         """
         if self.triangles is None:
             # Fallback to planar neighbors
@@ -327,77 +361,107 @@ class RIRTensor:
         batch_size = azimuth.shape[0]
 
         # Wrap azimuths to [-180, 180] to match delaunay_points
-        azimuth_wrapped = torch.where(azimuth > 180, azimuth - 360, azimuth)
+        azimuth_wrapped = azimuth.clone()
+        azimuth_wrapped[azimuth_wrapped > 180] -= 360
 
         # Query points in 2D: (batch_size, 2)
         query_points = torch.stack([azimuth_wrapped, elevation], dim=1)
 
-        # For each query point, find the triangle that contains it
-        # Use barycentric coordinates to check containment
-        result_indices = []
+        # 1. Find nearest vertex for each query point
+        # This is fast now due to dot-product optimization
+        nearest_idx = self._find_nearest_direction_batch(azimuth, elevation)
 
-        for i in range(batch_size):
-            query = query_points[i]  # (2,)
+        # 2. Get candidate triangles connected to the nearest vertex
+        # Shape: (batch_size, max_degree)
+        candidate_tri_indices = self.vertex_triangles[nearest_idx]
 
-            # Get all triangle vertices
-            triangle_verts = self.delaunay_points[
-                self.triangles
-            ]  # (num_triangles, 3, 2)
+        # Handle padding (-1)
+        mask = candidate_tri_indices != -1
+        # Use index 0 for padding, will be masked out later
+        safe_indices = torch.where(
+            mask, candidate_tri_indices, torch.zeros_like(candidate_tri_indices)
+        )
 
-            # Compute barycentric coordinates for all triangles
-            # For triangle with vertices v0, v1, v2 and point p:
-            # Barycentric coords (w0, w1, w2) where p = w0*v0 + w1*v1 + w2*v2
-            v0 = triangle_verts[:, 0, :]  # (num_triangles, 2)
-            v1 = triangle_verts[:, 1, :]  # (num_triangles, 2)
-            v2 = triangle_verts[:, 2, :]  # (num_triangles, 2)
+        # 3. Gather triangle vertices for candidates
+        # self.triangles: (num_triangles, 3)
+        # candidate_triangles: (batch_size, max_degree, 3)
+        candidate_triangles = self.triangles[safe_indices]
 
-            # Compute barycentric coordinates
-            v0_to_p = query - v0
-            v0_to_v1 = v1 - v0
-            v0_to_v2 = v2 - v0
+        # 4. Gather 2D coordinates of these vertices
+        # self.delaunay_points: (num_positions, 2)
+        # We need to gather from delaunay_points using candidate_triangles indices
+        # Flatten to use simple indexing
+        flat_verts_idx = candidate_triangles.view(-1)
+        flat_coords = self.delaunay_points[flat_verts_idx]
+        # Reshape back: (batch_size, max_degree, 3, 2)
+        tri_coords = flat_coords.view(batch_size, -1, 3, 2)
 
-            # Cross products (in 2D, this is the z-component of 3D cross)
-            denom = v0_to_v1[:, 0] * v0_to_v2[:, 1] - v0_to_v1[:, 1] * v0_to_v2[:, 0]
+        # Extract vertices
+        v0 = tri_coords[:, :, 0, :]  # (batch, max_degree, 2)
+        v1 = tri_coords[:, :, 1, :]
+        v2 = tri_coords[:, :, 2, :]
 
-            # Avoid division by zero
-            valid_triangles = torch.abs(denom) > 1e-8
+        # 5. Compute Barycentric coordinates
+        # Query points need to be expanded: (batch, 1, 2)
+        p = query_points.unsqueeze(1)
 
-            w1 = torch.zeros_like(denom)
-            w2 = torch.zeros_like(denom)
+        v0_to_v1 = v1 - v0
+        v0_to_v2 = v2 - v0
+        v0_to_p = p - v0
 
-            w1[valid_triangles] = (
-                v0_to_p[valid_triangles, 0] * v0_to_v2[valid_triangles, 1]
-                - v0_to_p[valid_triangles, 1] * v0_to_v2[valid_triangles, 0]
-            ) / denom[valid_triangles]
-            w2[valid_triangles] = (
-                v0_to_v1[valid_triangles, 0] * v0_to_p[valid_triangles, 1]
-                - v0_to_v1[valid_triangles, 1] * v0_to_p[valid_triangles, 0]
-            ) / denom[valid_triangles]
-            w0 = 1.0 - w1 - w2
+        denom = (
+            v0_to_v1[..., 0] * v0_to_v2[..., 1] - v0_to_v1[..., 1] * v0_to_v2[..., 0]
+        )
 
-            # Check if point is inside triangle (all barycentric coords in [0,1])
-            inside = (w0 >= -0.01) & (w1 >= -0.01) & (w2 >= -0.01) & valid_triangles
+        # Avoid division by zero
+        denom_safe = denom.clone()
+        denom_safe[torch.abs(denom) <= 1e-8] = 1.0
 
-            if inside.any():
-                # Use the first containing triangle
-                triangle_idx = torch.where(inside)[0][0]
-                result_indices.append(self.triangles[triangle_idx])
-            else:
-                # Fallback: find closest triangle by distance to centroid
-                centroids = (v0 + v1 + v2) / 3.0
-                distances = torch.norm(centroids - query, dim=1)
-                closest_triangle_idx = torch.argmin(distances)
-                result_indices.append(self.triangles[closest_triangle_idx])
+        cross_p_v2 = (
+            v0_to_p[..., 0] * v0_to_v2[..., 1] - v0_to_p[..., 1] * v0_to_v2[..., 0]
+        )
+        cross_v1_p = (
+            v0_to_v1[..., 0] * v0_to_p[..., 1] - v0_to_v1[..., 1] * v0_to_p[..., 0]
+        )
 
-        # Stack results: (batch_size, 3)
-        result = torch.stack(result_indices, dim=0)
-        return result[:, 0], result[:, 1], result[:, 2]
+        w1 = cross_p_v2.div_(denom_safe)
+        w2 = cross_v1_p.div_(denom_safe)
+        w0 = 1.0 - w1 - w2
 
-    def _get_planar_neighbours_batchrir_pathh(
+        # 6. Check if point is inside triangle
+        tolerance = 0.01
+        inside = (w0 >= -tolerance) & (w1 >= -tolerance) & (w2 >= -tolerance)
+
+        # Apply mask (ignore padded triangles)
+        inside = inside & mask
+
+        # 7. Select the containing triangle
+        has_match = inside.any(dim=1)
+        match_idx_local = inside.float().argmax(
+            dim=1
+        )  # Index into candidates (0..max_degree)
+
+        # Gather the actual triangle index
+        match_tri_idx = candidate_tri_indices.gather(
+            1, match_idx_local.unsqueeze(1)
+        ).squeeze(1)
+
+        # Fallback: if no containing triangle found (rare), use the first candidate
+        # (which is connected to the nearest vertex)
+        final_tri_idx = torch.where(
+            has_match, match_tri_idx, candidate_tri_indices[:, 0]
+        )
+
+        # Retrieve vertices for the selected triangles
+        result_triangles = self.triangles[final_tri_idx]
+
+        return result_triangles[:, 0], result_triangles[:, 1], result_triangles[:, 2]
+
+    def _get_planar_neighbours_batch(
         self, azimuth: torch.Tensor, elevation: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Get nearest planar azimuth neighbours on the closest elevation plane (vectorized).
+        Get nearest planar azimuth neighbours on the closest elevation plane (chunked for memory efficiency).
         Fallback method when Delaunay triangulation is not available.
 
         Args:
@@ -408,48 +472,57 @@ class RIRTensor:
             Three tensors of indices, each of shape (batch_size,)
         """
         batch_size = azimuth.shape[0]
-        azimuth = (azimuth + 360) % 360
+        azimuth = azimuth.clone().add_(360).remainder_(360)
 
-        # Find nearest elevation for each query
-        # Shape: (batch_size, num_positions)
-        el_diff = torch.abs(self.elevations.unsqueeze(0) - elevation.unsqueeze(1))
-        nearest_el_idx = torch.argmin(el_diff, dim=1)  # (batch_size,)
-        nearest_el = self.elevations[nearest_el_idx]  # (batch_size,)
+        # Process in chunks to avoid memory explosion
+        # Each chunk creates tensors of shape (chunk_size, num_positions)
+        chunk_size = 1024
 
-        # For simplicity, return nearest 3 points on that elevation plane
-        # Create mask for each batch element
-        indices_list = []
+        idx1 = torch.empty(batch_size, dtype=torch.long, device=self.device)
+        idx2 = torch.empty(batch_size, dtype=torch.long, device=self.device)
+        idx3 = torch.empty(batch_size, dtype=torch.long, device=self.device)
 
-        for i in range(batch_size):
-            # Find all points at this elevation
-            el_mask = torch.abs(self.elevations - nearest_el[i]) < 0.001
-            planar_indices = torch.where(el_mask)[0]
-            planar_azimuths = self.azimuths[planar_indices]
+        for chunk_start in range(0, batch_size, chunk_size):
+            chunk_end = min(chunk_start + chunk_size, batch_size)
+            chunk_az = azimuth[chunk_start:chunk_end]
+            chunk_el = elevation[chunk_start:chunk_end]
 
-            # Calculate azimuth differences (handle wrapping)
-            az_diff = planar_azimuths - azimuth[i]
-            az_diff = torch.where(az_diff > 180, az_diff - 360, az_diff)
-            az_diff = torch.where(az_diff < -180, az_diff + 360, az_diff)
+            # Find nearest elevation for each query in chunk
+            el_diff = (self.elevations.unsqueeze(0) - chunk_el.unsqueeze(1)).abs_()
+            nearest_el_idx = torch.argmin(el_diff, dim=1)
+            nearest_el = self.elevations[nearest_el_idx]
 
-            # Find closest points
-            abs_diff = torch.abs(az_diff)
-            sorted_indices = torch.argsort(abs_diff)
+            del el_diff
 
-            # Take 3 nearest (or duplicate if fewer available)
-            if len(sorted_indices) >= 3:
-                idx1, idx2, idx3 = planar_indices[sorted_indices[:3]]
-            elif len(sorted_indices) == 2:
-                idx1, idx2 = planar_indices[sorted_indices[:2]]
-                idx3 = idx2
-            else:
-                idx1 = idx2 = idx3 = planar_indices[sorted_indices[0]]
+            # Calculate azimuth differences with wrapping
+            az_diff = self.azimuths.unsqueeze(0) - chunk_az.unsqueeze(1)
+            # Wrap to [-180, 180] range in-place
+            az_diff[az_diff > 180] -= 360
+            az_diff[az_diff < -180] += 360
+            az_diff.abs_()
 
-            indices_list.append([idx1, idx2, idx3])
+            # Create elevation mask
+            el_tolerance = 0.1
+            el_mask = (
+                torch.abs(self.elevations.unsqueeze(0) - nearest_el.unsqueeze(1))
+                < el_tolerance
+            )
 
-        indices_tensor = torch.tensor(
-            indices_list, device=self.device
-        )  # (batch_size, 3)
-        return indices_tensor[:, 0], indices_tensor[:, 1], indices_tensor[:, 2]
+            # Set distance to infinity for positions not on the elevation plane (in-place)
+            az_diff[~el_mask] = float("inf")
+
+            del el_mask
+
+            # Get indices of 3 smallest distances
+            _, top3_local_idx = torch.topk(az_diff, k=3, dim=1, largest=False)
+
+            del az_diff
+
+            idx1[chunk_start:chunk_end] = top3_local_idx[:, 0]
+            idx2[chunk_start:chunk_end] = top3_local_idx[:, 1]
+            idx3[chunk_start:chunk_end] = top3_local_idx[:, 2]
+
+        return idx1, idx2, idx3
 
     def angle_batch(
         self,
@@ -479,13 +552,13 @@ class RIRTensor:
 
         batch_size = azimuth.shape[0]
 
-        # Ensure tensors are on correct device
-        azimuth = azimuth.to(self.device, dtype=self.dtype)
-        elevation = elevation.to(self.device, dtype=self.dtype)
+        # Ensure tensors are on correct device and normalize angles (clone to avoid modifying input)
+        azimuth = azimuth.to(self.device, dtype=self.dtype).clone()
+        elevation = elevation.to(self.device, dtype=self.dtype).clone()
 
-        # Normalize angles
-        azimuth = (azimuth + 360) % 360
-        elevation = torch.clamp(elevation, -90, 90)
+        # Normalize angles in-place
+        azimuth.add_(360).remainder_(360)
+        elevation.clamp_(-90, 90)
 
         # Initialize output tensors
         left_output = torch.zeros(
@@ -495,27 +568,35 @@ class RIRTensor:
             batch_size, self.tap_length, device=self.device, dtype=self.dtype
         )
 
+        # Precompute query Cartesian coordinates
+        query_xyz = self._spherical_to_cartesian_batch(azimuth, elevation)
+
+        # Find nearest for all queries (used for nearest mode, exact match check, and fallback)
+        nearest_idx = self._find_nearest_direction_batch(azimuth, elevation)
+
         if mode == "nearest":
-            # Simple nearest neighbor for all
-            nearest_idx = self._find_nearest_direction_batch(azimuth, elevation)
             left_output, right_output = self._get_hrir_at_index_batch(nearest_idx)
             return left_output, right_output
 
-        # Check for exact matches
-        exact_matches = self._angle_exists_batch(azimuth, elevation)
+        # Check for exact matches using the nearest neighbors we just found
+        nearest_az = self.azimuths[nearest_idx]
+        nearest_el = self.elevations[nearest_idx]
+
+        # Check differences (handling wrapping for azimuth)
+        az_diff = (azimuth - nearest_az).abs_()
+        torch.minimum(az_diff, 360 - az_diff, out=az_diff)
+        el_diff = (elevation - nearest_el).abs_()
+
+        tolerance = 0.001
+        exact_matches = (az_diff < tolerance) & (el_diff < tolerance)
 
         if torch.all(exact_matches):
             # All angles exist exactly
-            indices = self._get_angle_index_batch(azimuth, elevation)
-            return self._get_hrir_at_index_batch(indices)
+            return self._get_hrir_at_index_batch(nearest_idx)
 
-        # Find nearest for all queries
-        nearest_idx = self._find_nearest_direction_batch(azimuth, elevation)
-        nearest_az = self.azimuths[nearest_idx]
-        nearest_el = self.elevations[nearest_idx]
-        nearest_dist = self._get_angle_distance_batch(
-            azimuth, elevation, nearest_az, nearest_el
-        )
+        # Calculate distance to nearest neighbor
+        nearest_xyz = self.cartesian_positions[nearest_idx]
+        nearest_dist = torch.norm(query_xyz - nearest_xyz, dim=-1)
 
         # Determine which need interpolation
         if mode == "auto":
@@ -551,27 +632,31 @@ class RIRTensor:
                     az_interp, el_interp
                 )
 
-            # Get angles for the three points
-            az1, el1 = self.azimuths[idx1], self.elevations[idx1]
-            az2, el2 = self.azimuths[idx2], self.elevations[idx2]
-            az3, el3 = self.azimuths[idx3], self.elevations[idx3]
+            # Get Cartesian coordinates for the three points
+            p1 = self.cartesian_positions[idx1]
+            p2 = self.cartesian_positions[idx2]
+            p3 = self.cartesian_positions[idx3]
+
+            # Get Cartesian coordinates for query points
+            p_interp = query_xyz[interp_mask]
 
             # Calculate distances
-            dist1 = self._get_angle_distance_batch(az_interp, el_interp, az1, el1)
-            dist2 = self._get_angle_distance_batch(az_interp, el_interp, az2, el2)
-            dist3 = self._get_angle_distance_batch(az_interp, el_interp, az3, el3)
+            dist1 = torch.norm(p_interp - p1, dim=-1)
+            dist2 = torch.norm(p_interp - p2, dim=-1)
+            dist3 = torch.norm(p_interp - p3, dim=-1)
 
-            # Calculate inverse distance weights
+            # Calculate inverse distance weights (in-place)
             eps = 1e-6
-            inv_dist1 = 1.0 / (dist1 + eps)
-            inv_dist2 = 1.0 / (dist2 + eps)
-            inv_dist3 = 1.0 / (dist3 + eps)
+            dist1.add_(eps).reciprocal_()  # inv_dist1 = 1.0 / (dist1 + eps)
+            dist2.add_(eps).reciprocal_()  # inv_dist2 = 1.0 / (dist2 + eps)
+            dist3.add_(eps).reciprocal_()  # inv_dist3 = 1.0 / (dist3 + eps)
+            inv_dist1, inv_dist2, inv_dist3 = dist1, dist2, dist3
 
             if mode == "two_point":
                 # Use only two closest points
                 sum_inv = inv_dist1 + inv_dist2
-                w1 = inv_dist1 / sum_inv
-                w2 = inv_dist2 / sum_inv
+                w1 = inv_dist1.div_(sum_inv)
+                w2 = inv_dist2.div_(sum_inv)
 
                 left1, right1 = self.data[idx1, 0], self.data[idx1, 1]
                 left2, right2 = self.data[idx2, 0], self.data[idx2, 1]
@@ -582,24 +667,26 @@ class RIRTensor:
             else:  # three_point or auto
                 # Use all three points
                 sum_inv = inv_dist1 + inv_dist2 + inv_dist3
-                w1 = inv_dist1 / sum_inv
-                w2 = inv_dist2 / sum_inv
-                w3 = inv_dist3 / sum_inv
+                w1 = inv_dist1.div_(sum_inv)
+                w2 = inv_dist2.div_(sum_inv)
+                w3 = inv_dist3.div_(sum_inv)
 
                 left1, right1 = self.data[idx1, 0], self.data[idx1, 1]
                 left2, right2 = self.data[idx2, 0], self.data[idx2, 1]
                 left3, right3 = self.data[idx3, 0], self.data[idx3, 1]
 
-                left_interp = (
-                    w1.unsqueeze(1) * left1
-                    + w2.unsqueeze(1) * left2
-                    + w3.unsqueeze(1) * left3
-                )
-                right_interp = (
-                    w1.unsqueeze(1) * right1
-                    + w2.unsqueeze(1) * right2
-                    + w3.unsqueeze(1) * right3
-                )
+                # Compute weighted sum using in-place operations
+                w1_expanded = w1.unsqueeze(1)
+                w2_expanded = w2.unsqueeze(1)
+                w3_expanded = w3.unsqueeze(1)
+
+                left_interp = left1.mul(w1_expanded)
+                left_interp.addcmul_(left2, w2_expanded)
+                left_interp.addcmul_(left3, w3_expanded)
+
+                right_interp = right1.mul(w1_expanded)
+                right_interp.addcmul_(right2, w2_expanded)
+                right_interp.addcmul_(right3, w3_expanded)
 
             # Store interpolated results
             interp_indices = torch.where(interp_mask)[0]
