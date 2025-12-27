@@ -205,9 +205,9 @@ class RIRTensor:
         if self.source_positions is None:
             raise ValueError("No spatial position data available")
 
-        # Normalize angles (clone to avoid modifying input, then use in-place)
-        azimuth = azimuth.clone().remainder_(360)
-        elevation = elevation.clone().clamp_(-90, 90)
+        # Normalize angles
+        azimuth = azimuth % 360
+        elevation = elevation.clamp(-90, 90)
 
         # Convert query points to cartesian coordinates
         query_xyz = self._spherical_to_cartesian_batch(
@@ -324,8 +324,8 @@ class RIRTensor:
             v0_to_v1[..., 0] * v0_to_p[..., 1] - v0_to_v1[..., 1] * v0_to_p[..., 0]
         )
 
-        w1 = cross_p_v2.div_(denom_safe)
-        w2 = cross_v1_p.div_(denom_safe)
+        w1 = cross_p_v2 / denom_safe
+        w2 = cross_v1_p / denom_safe
         w0 = 1.0 - w1 - w2
 
         # 6. Check if point is inside triangle
@@ -371,7 +371,7 @@ class RIRTensor:
         Returns:
             Three tensors of indices, each of shape (batch_size,)
         """
-        azimuth = azimuth.clone().add_(360).remainder_(360)
+        azimuth = (azimuth + 360) % 360
 
         # Find nearest elevation for each query
         el_diff = (self.elevations.unsqueeze(0) - elevation.unsqueeze(1)).abs_()
@@ -405,7 +405,7 @@ class RIRTensor:
         azimuth: torch.Tensor,
         elevation: torch.Tensor,
         mode: Literal["auto", "nearest", "two_point", "three_point"] = "auto",
-        distance_threshold: float = 0.035,
+        distance_threshold: float = 0.01,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Get HRIR for multiple directions with interpolation (fully vectorized).
@@ -523,16 +523,15 @@ class RIRTensor:
 
             # Calculate inverse distance weights (in-place)
             eps = 1e-6
-            dist1.add_(eps).reciprocal_()  # inv_dist1 = 1.0 / (dist1 + eps)
-            dist2.add_(eps).reciprocal_()  # inv_dist2 = 1.0 / (dist2 + eps)
-            dist3.add_(eps).reciprocal_()  # inv_dist3 = 1.0 / (dist3 + eps)
-            inv_dist1, inv_dist2, inv_dist3 = dist1, dist2, dist3
+            dist1.add_(eps).reciprocal_()
+            dist2.add_(eps).reciprocal_()
+            dist3.add_(eps).reciprocal_()
 
             if mode == "two_point":
                 # Use only two closest points
-                sum_inv = inv_dist1 + inv_dist2
-                w1 = inv_dist1.div_(sum_inv)
-                w2 = inv_dist2.div_(sum_inv)
+                sum_inv = dist1 + dist2
+                w1 = dist1 / sum_inv
+                w2 = dist2 / sum_inv
 
                 left1, right1 = self.data[idx1, 0], self.data[idx1, 1]
                 left2, right2 = self.data[idx2, 0], self.data[idx2, 1]
@@ -542,10 +541,10 @@ class RIRTensor:
 
             else:  # three_point or auto
                 # Use all three points
-                sum_inv = inv_dist1 + inv_dist2 + inv_dist3
-                w1 = inv_dist1.div_(sum_inv)
-                w2 = inv_dist2.div_(sum_inv)
-                w3 = inv_dist3.div_(sum_inv)
+                sum_inv = dist1 + dist2 + dist3
+                w1 = dist1 / sum_inv
+                w2 = dist2 / sum_inv
+                w3 = dist3 / sum_inv
 
                 left1, right1 = self.data[idx1, 0], self.data[idx1, 1]
                 left2, right2 = self.data[idx2, 0], self.data[idx2, 1]
