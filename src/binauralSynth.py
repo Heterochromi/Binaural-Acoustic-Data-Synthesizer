@@ -9,7 +9,7 @@ from src.batchFramRir import batch_fram_brir
 from .batchedHrir import BatchedHRIR
 
 # from .framRir import fram_brir
-from .occlusionFilter import apply_occlusion
+from .occlusionFilter import apply_occlusion_frequency_domain
 from .rirTensor import RIRTensor
 
 
@@ -124,17 +124,11 @@ class BinauralSynth:
         labels = [self.id2label[idx] for idx in label_indices.tolist()]
         return labels
 
+    @torch.no_grad()
     def single_sample_auralize(self, waveforms: torch.Tensor, labels: List[str]):
         waveforms, label_onehot = self._encode_waveforms(waveforms, labels)
         label_len = label_onehot.shape[0]
         # samples = torch.zeros(label_len, self.sample_length).to(self.device)
-
-        base_attenuation_db = (
-            torch.empty(1, dtype=torch.float32).uniform_(8.0, 15.0).to(self.device)
-        )
-        max_attenuation_db = base_attenuation_db * (
-            torch.empty(1, dtype=torch.float32).uniform_(2, 4).to(self.device)
-        )
         crit_freq_hz = (
             torch.empty(1, dtype=torch.float32).uniform_(300.0, 4000.0).to(self.device)
         )
@@ -145,24 +139,20 @@ class BinauralSynth:
             torch.empty(1, dtype=torch.float32).uniform_(5.0, 15.0).to(self.device)
         )
 
-        occluded_waveforms, occlusion_mask = apply_occlusion(
+        occluded_waveforms, occlusion_mask = apply_occlusion_frequency_domain(
             waveforms,
             sample_rate=self.sample_rate,
-            base_attenuation_db=base_attenuation_db.item(),
-            max_attenuation_db=max_attenuation_db.item(),
             crit_freq_hz=crit_freq_hz.item(),
             crit_width_hz=crit_width_hz.item(),
             attenuation_dip_strength_db=attenuation_dip_strength_db.item(),
-            probability=0.5,
-            device=torch.device("cpu"),
+            probability=0.0,
+            device=self.device,
         )
         occluded_waveforms = occluded_waveforms.to(self.device)
         occlusion_mask = occlusion_mask.to(self.device)
 
-        room_dim_xz = (
-            torch.empty(1, dtype=torch.float32).uniform_(6, 10).to(self.device)
-        )
-        room_dim_y = torch.empty(1, dtype=torch.float32).uniform_(2, 4).to(self.device)
+        room_dim_xz = torch.empty(1, dtype=torch.float32).uniform_(3, 7).to(self.device)
+        room_dim_y = torch.empty(1, dtype=torch.float32).uniform_(1, 3).to(self.device)
         room_dim = torch.cat([room_dim_xz, room_dim_y, room_dim_xz]).to(self.device)
         src_pos = torch.empty(label_len, 3, dtype=torch.float32).uniform_(0, 1).to(
             self.device
@@ -214,7 +204,9 @@ class BinauralSynth:
         )
 
         # apply distance attenuation to the direct sound
-        direct_dist = torch.sqrt((mic_pos - src_pos).pow(2).sum(dim=-1) + 1e-6)
+        direct_dist = torch.clamp(
+            torch.sqrt((mic_pos - src_pos).pow(2).sum(dim=-1) + 1e-6), min=1.0
+        )
         gain = 1 / direct_dist
 
         hrirs = hrirs * gain.unsqueeze(-1).unsqueeze(-1)
@@ -238,6 +230,7 @@ class BinauralSynth:
             n_reflection=n_reflections,
             src_pos=src_pos,
             room_dim=room_dim_expanded,
+            reflection_chunk_size=100,
             device=self.device,
         )
         reverb_left = reverb[:, 0]

@@ -1,8 +1,8 @@
 import torch
-import torchaudio
 import torchaudio.functional as F_audio
 
 
+@torch.no_grad()
 def apply_occlusion(
     waveforms: torch.Tensor,  # [B, T]
     sample_rate: int,
@@ -73,84 +73,92 @@ def apply_occlusion(
     return waveforms, apply_mask.squeeze(1)
 
 
-# def apply_occlusion(
-#     sample_rate: int = 44100,
-#     max_attenuation_db: float = 40.0,
-#     base_attenuation_db: float = 20.0,
-#     crit_freq_hz: float = 1500.0,
-#     crit_width_hz: float = 1000.0,
-#     dip_strength_db: float = 10.0,
-#     n_fft: int = 2048,
-#     ir_len: int = 513,
-# ):
-#     """
-#     This is a simple audio occlusion filter that tries to mimic real world single panel sound transmission loss.
+@torch.no_grad()
+def apply_occlusion_frequency_domain(
+    waveforms: torch.Tensor,  # [B, T]
+    sample_rate: int,
+    crit_freq_hz: float = 4000.0,
+    crit_width_hz: float = 1000.0,
+    attenuation_dip_strength_db: float = 6.0,
+    probability: float = 1.0,
+    device: torch.device = torch.device("cpu"),
+):
+    """
+    Simple frequency-domain (single panel sound transmission loss) occlusion filter using direct mask multiplication.
 
-#     Args:
-#         sample_rate (int): Sample rate of the audio signal.
-#         max_attenuation_db (float): Maximum attenuation in dB.
-#         base_attenuation_db (float): Base attenuation in dB.
-#         crit_freq_hz (float): Critical frequency in Hz.
-#         crit_width_hz (float): Critical width in Hz.
-#         dip_strength_db (float): Dip strength in dB.
-#         n_fft (int): Number of FFT bins.
+    Args:
+        waveforms (torch.Tensor): Input audio waveforms [B, T].
+        sample_rate (int): Sample rate of the audio signal.
+        max_attenuation_db (float): Maximum attenuation in decibels at nyquist.
+        crit_freq_hz (float): Critical frequency in Hz for the dip (move down for thicker wall or denser material, move up for thinner wall or lighter material).
+        crit_width_hz (float): Width of the critical frequency dip in Hz.
+        attenuation_dip_strength_db (float): Strength of the dip at critical frequency in dB.
+        probability (float): Probability of applying occlusion per waveform.
+        device (torch.device): Device to run the computation on.
 
-#     Returns:
-#         torch.Tensor: Filter curve in dB.
-#     """
-#     # Frequency grid
-#     freqs = torch.linspace(0, sample_rate / 2, n_fft // 2 + 1)
+    Returns:
+        torch.Tensor: Filtered audio waveforms [B, T].
+        torch.Tensor: Mask indicating which waveforms were occluded [B].
+    """
+    if probability < 0 or probability > 1:
+        raise ValueError("probability must be between 0 and 1")
 
-#     # 1. Linear Attenuation
-#     nyquist = sample_rate / 2
-#     slope = -max_attenuation_db / nyquist
-#     base_db = slope * freqs - base_attenuation_db
+    waveforms = waveforms.to(device)
+    original_waveforms = waveforms.clone()
+    batch_size = waveforms.shape[0]
+    n_samples = waveforms.shape[1]
 
-#     # gaussian dip
-#     sigma = crit_width_hz / 2.355
-#     gauss = torch.exp(-0.5 * ((freqs - crit_freq_hz) / sigma) ** 2)
-#     drip_db = gauss * dip_strength_db
-#     db = base_db + drip_db
+    n_fft = n_samples
 
-#     final_db = torch.clamp(db, max=0.0)
+    apply_mask = (torch.rand(batch_size, device=device) < probability).float()
 
-#     # dB to Magnitude
-#     mag = 10.0 ** (final_db / 20.0)
+    freqs = torch.linspace(0, sample_rate / 2, n_fft // 2 + 1, device=device)
 
-#     # Create Minimum Phase or Linear Phase IR (Same as before)
-#     H = torch.zeros(n_fft, dtype=torch.complex64)
-#     H[: n_fft // 2 + 1] = mag * torch.exp(1j * torch.zeros_like(mag))
-#     H[n_fft // 2 + 1 :] = torch.conj(torch.flip(H[1 : n_fft // 2], dims=[0]))
+    # 1. Low frequency mask (0 to crit_freq_hz): 6dB per octave
 
-#     h = torch.fft.ifft(H).real
-#     h = torch.roll(h, shifts=-(ir_len // 2))
-#     h = h[:ir_len]
+    low_fc = crit_freq_hz  # Use crit_freq as the reference point
+    low_freq_mask = low_fc / (low_fc + freqs)
 
-#     # Optional windowing to smooth edges
-#     window = torch.hann_window(ir_len)
-#     h = h * window
+    # 2. Critical frequency mask (gaussian dip at crit_freq_hz)
+    sigma = crit_width_hz / 2.355  # FWHM to sigma
+    gaussian = torch.exp(-0.5 * ((freqs - crit_freq_hz) / sigma) ** 2)
+    attenuation_dip = 10.0 ** (-attenuation_dip_strength_db / 20.0)
+    crit_freq_mask = 1 - gaussian * (attenuation_dip - 1)
 
-#     return final_db
+    # 3. high frequency mask (after crit_freq_hz): 9dB per octave
+    high_fc = crit_freq_hz  # Transition point at crit_freq
+    high_freq_rolloff = (high_fc / (high_fc + freqs)) ** 1.5
 
+    # Blend masks: use low_freq below crit, high_freq above crit
+    transition_width = crit_width_hz
+    transition = torch.sigmoid((freqs - crit_freq_hz) / (transition_width / 4))
 
-if "__main__" == __name__:
-    import torch
+    # Combine low and high frequency masks with smooth transition
+    freq_response_mask = (
+        1 - transition
+    ) * low_freq_mask + transition * high_freq_rolloff
 
-    max_attenuation_db = 25
-    base_attenuation_db = 10
-    crit_freq_hz = 1000
-    crit_width_hz = 1000.0
-    attenuation_dip_strength_db = 5.0
+    # 4. Combined frequency mask (apply crit dip on top)
+    freq_mask = freq_response_mask * crit_freq_mask  # [n_fft // 2 + 1]
 
-    waveform, sr = torchaudio.load("waveforms/hegrenade_detonate_02.wav")
-    waveform = waveform / waveform.abs().max()
-    occluded_waveforms = apply_occlusion(
-        waveform,
-        sr,
-        max_attenuation_db=max_attenuation_db,
-        base_attenuation_db=base_attenuation_db,
-        crit_freq_hz=crit_freq_hz,
-        crit_width_hz=crit_width_hz,
-        attenuation_dip_strength_db=attenuation_dip_strength_db,
+    # 5. Apply mask in frequency domain
+    # FFT of waveforms
+    waveforms_fft = torch.fft.rfft(waveforms, n=n_fft)  # [B, n_fft // 2 + 1]
+
+    # Multiply by frequency mask
+    filtered_fft = waveforms_fft * freq_mask.unsqueeze(0)  # [B, n_fft // 2 + 1]
+
+    # Inverse FFT
+    filtered_waveforms = torch.fft.irfft(filtered_fft, n=n_fft)  # [B, n_fft]
+
+    # Trim to original length
+    filtered_waveforms = filtered_waveforms[:, :n_samples]
+
+    # Blend between original and filtered based on apply_mask
+    apply_mask_expanded = apply_mask.unsqueeze(-1)  # [B, 1]
+    output = (
+        apply_mask_expanded * filtered_waveforms
+        + (1 - apply_mask_expanded) * original_waveforms
     )
-    torchaudio.save("output.wav", occluded_waveforms, sr)
+
+    return output, apply_mask

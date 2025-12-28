@@ -20,6 +20,7 @@ from torchaudio.transforms import Resample
 from .rirTensor import RIRTensor
 
 
+@torch.no_grad()
 def dist_first_order_reflection_batch(
     src_pos: Tensor, mic_pos: Tensor, room_dim: Tensor
 ) -> Tensor:
@@ -67,6 +68,7 @@ def dist_first_order_reflection_batch(
     return min_reflection_dist
 
 
+@torch.no_grad()
 def batch_fram_brir(
     target_sr: int,
     t60: Tensor,
@@ -305,7 +307,6 @@ def batch_fram_brir(
         azm_degree = torch.rad2deg(azm_of_arrival).view(-1)
         ele_degree = torch.rad2deg(ele_of_arrival).view(-1)
 
-        # HRIR lookup for this chunk only (THE KEY MEMORY SAVING)
         left_hrirs, right_hrirs = h_rir.angle_batch(azm_degree, ele_degree)
         left_hrirs = left_hrirs.view(B, chunk_size, hrir_len)
         right_hrirs = right_hrirs.view(B, chunk_size, hrir_len)
@@ -364,6 +365,7 @@ def batch_fram_brir(
 # original non CHUNKED
 
 
+@torch.no_grad()
 def batch_fram_brir_none_chunk(
     target_sr: int,
     t60: Tensor,
