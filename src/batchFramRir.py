@@ -71,7 +71,7 @@ def dist_first_order_reflection_batch(
 @torch.no_grad()
 def batch_fram_brir(
     target_sr: int,
-    t60: Tensor,
+    # t60: Tensor,
     h_rir: RIRTensor,
     hrir_sr: int = 96000,
     mic_pos: Tensor = None,
@@ -124,7 +124,6 @@ def batch_fram_brir(
         mic_pos.shape[0] != room_dim.shape[0]
         or mic_pos.shape[0] != src_pos.shape[0]
         or mic_pos.shape[0] != n_reflection.shape[0]
-        or mic_pos.shape[0] != t60.shape[0]
     ):
         raise ValueError(
             "mic_pos, room_dim, src_pos, t60, and n_reflection must have the same batch size"
@@ -134,10 +133,9 @@ def batch_fram_brir(
     mic_pos = mic_pos.to(device).float()
     src_pos = src_pos.to(device).float()
     room_dim = room_dim.to(device).float()
-    t60 = t60.to(device).float()
     n_reflection = n_reflection.to(device)
 
-    B = t60.shape[0]
+    B = mic_pos.shape[0]
 
     downsampler = Resample(orig_freq=hrir_sr, new_freq=target_sr).to(device)
 
@@ -151,14 +149,13 @@ def batch_fram_brir(
     else:
         hrir_len = 256
 
-    # Randomly sample number of reflections for each batch element
-    # n_reflection: (B, 2) where [:, 0] is low, [:, 1] is high
-    n_ref_low = n_reflection[:, 0]  # (B,)
-    n_ref_high = n_reflection[:, 1]  # (B,)
+    density = torch.empty(B, device=device).uniform_(300000, 500000)
+    t60 = torch.empty(B, dtype=torch.float32).uniform_(0.3, 1).to(device)
 
-    # Sample uniformly in [low, high) for each batch element
-    rand_vals = torch.rand(B, device=device)
-    image_counts = (n_ref_low + rand_vals * (n_ref_high - n_ref_low)).long()  # (B,)
+    image_counts = (density * t60).int()  # (B,)
+    print("Image counts per batch item:", image_counts)
+    print("t60", t60)
+    print("Density", density)
 
     # Use maximum image count for uniform tensor operations
     max_image_count = image_counts.max().item()
@@ -356,7 +353,9 @@ def batch_fram_brir(
 
     # Downsample to target sample rate
     # Resample expects (..., time) format
+    normalizatrion = 1.0 / torch.sqrt(density)
     brir_final = downsampler(brir_high)
+    brir_final = brir_final * normalizatrion.view(B, 1, 1)
 
     valid_after_dry = (target_sr * t60).long()
     return brir_final, valid_after_dry

@@ -211,13 +211,19 @@ class BinauralSynth:
 
         hrirs = hrirs * gain.unsqueeze(-1).unsqueeze(-1)
 
-        t60 = (
-            torch.empty(src_pos.shape[0], dtype=torch.float32)
-            .uniform_(0.3, 0.3)
-            .to(self.device)
-        )
+        # note for later, in order to make reverb more realistic we need to scale n_reflections with t_60,
+        # because a long t60 and low n_reflections will make it sound like  the same sound played many time over when its reverb,
+        # while many n_reflections in a short t_60 will play so many reflections at the same time to the point where it will over power the original sound and hide it,
+        # making localization impossible.
+        # done for now, by scaling t60 inside the fram function depending on a random logical density of reflections.
+
+        # t60 = (
+        #     torch.empty(src_pos.shape[0], dtype=torch.float32)
+        #     .uniform_(0.3, 0.3)
+        #     .to(self.device)
+        # )
         n_reflections = torch.randint(
-            300, 600, (src_pos.shape[0], 2), dtype=torch.int32
+            300, 4000, (src_pos.shape[0], 2), dtype=torch.int32
         ).to(self.device)
 
         room_dim_expanded = room_dim.unsqueeze(0).expand(mic_pos.shape[0], -1)
@@ -225,7 +231,6 @@ class BinauralSynth:
             target_sr=self.sample_rate,
             hrir_sr=96000,
             h_rir=self.hrirTensor,
-            t60=t60,
             mic_pos=mic_pos,
             n_reflection=n_reflections,
             src_pos=src_pos,
