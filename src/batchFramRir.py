@@ -149,10 +149,11 @@ def batch_fram_brir(
     else:
         hrir_len = 256
 
-    density = torch.empty(B, device=device).uniform_(300000, 500000)
-    t60 = torch.empty(B, dtype=torch.float32).uniform_(0.3, 1).to(device)
-
-    image_counts = (density * t60).int()  # (B,)
+    p = torch.rand(B, dtype=torch.float32, device=device)
+    t60 = 0.3 + (1.5 - 0.3) * p.pow(3)
+    # density varies ±15% for room character diversity
+    density = torch.empty(B, device=device).uniform_(6000, 10000)
+    image_counts = (density * t60).int()  # (B,)a
     print("Image counts per batch item:", image_counts)
     print("t60", t60)
     print("Density", density)
@@ -233,7 +234,7 @@ def batch_fram_brir(
 
         # Sample distances for this chunk
         u = torch.rand(B, chunk_size, device=device)
-        normalized_dist_samples = u.pow(1.0 / 3.0)
+        normalized_dist_samples = u.sqrt()
         dist_nearest_ratio = min_dist_ratio.unsqueeze(1) + normalized_dist_samples * (
             dist_range_end - min_dist_ratio
         ).unsqueeze(1)
@@ -351,11 +352,11 @@ def batch_fram_brir(
     # highpass_biquad expects (..., time) and applies along last dimension
     # brir_high = highpass_biquad(brir_high, hrir_sr, 80.0)
 
+    normalization = torch.sqrt(8000 / density)
+    brir_high = brir_high * normalization.view(B, 1, 1)
     # Downsample to target sample rate
     # Resample expects (..., time) format
-    normalizatrion = 1.0 / torch.sqrt(density)
     brir_final = downsampler(brir_high)
-    brir_final = brir_final * normalizatrion.view(B, 1, 1)
 
     valid_after_dry = (target_sr * t60).long()
     return brir_final, valid_after_dry
