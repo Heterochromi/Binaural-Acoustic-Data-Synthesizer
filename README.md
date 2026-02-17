@@ -1,4 +1,4 @@
-# Binaural-Acoustic-Data-Synthesizer
+# Binaural-Acoustic-Data-Synthesizer(incomplete project)
 
 A PyTorch based library for accelerated generation of synthetic Binaural audio using the following works:
 
