@@ -152,7 +152,7 @@ def batch_fram_brir(
     p = torch.rand(B, dtype=torch.float32, device=device)
     t60 = 0.3 + (1.5 - 0.3) * p.pow(3)
     # density varies ±15% for room character diversity
-    density = torch.empty(B, device=device).uniform_(6000, 10000)
+    density = torch.empty(B, device=device).uniform_(2000, 10000)
     image_counts = (density * t60).int()  # (B,)a
     print("Image counts per batch item:", image_counts)
     print("t60", t60)
@@ -352,7 +352,7 @@ def batch_fram_brir(
     # highpass_biquad expects (..., time) and applies along last dimension
     # brir_high = highpass_biquad(brir_high, hrir_sr, 80.0)
 
-    normalization = torch.sqrt(8000 / density)
+    normalization = torch.sqrt(6000 / density)
     brir_high = brir_high * normalization.view(B, 1, 1)
     # Downsample to target sample rate
     # Resample expects (..., time) format
