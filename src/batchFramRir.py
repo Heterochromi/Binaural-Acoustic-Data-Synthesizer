@@ -350,7 +350,7 @@ def batch_fram_brir(
 
     # Apply highpass filter to each batch element
     # highpass_biquad expects (..., time) and applies along last dimension
-    # brir_high = highpass_biquad(brir_high, hrir_sr, 80.0)
+    brir_high = highpass_biquad(brir_high, hrir_sr, 80.0)
 
     normalization = torch.sqrt(6000 / density)
     brir_high = brir_high * normalization.view(B, 1, 1)
