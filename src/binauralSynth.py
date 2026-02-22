@@ -151,9 +151,12 @@ class BinauralSynth:
         occluded_waveforms = occluded_waveforms.to(self.device)
         occlusion_mask = occlusion_mask.to(self.device)
 
-        room_dim_xz = torch.empty(1, dtype=torch.float32).uniform_(3, 7).to(self.device)
+        room_dim_xz = (
+            torch.empty(1, dtype=torch.float32).uniform_(3, 10).to(self.device)
+        )
         room_dim_y = torch.empty(1, dtype=torch.float32).uniform_(2, 3).to(self.device)
         room_dim = torch.cat([room_dim_xz, room_dim_y, room_dim_xz]).to(self.device)
+        print(f"Room dimensions (x, y, z): {room_dim.cpu().numpy()} meters")
         src_pos = torch.empty(label_len, 3, dtype=torch.float32).uniform_(0, 1).to(
             self.device
         ) * room_dim.unsqueeze(0)
