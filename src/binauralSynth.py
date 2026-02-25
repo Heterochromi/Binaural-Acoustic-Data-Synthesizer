@@ -142,10 +142,12 @@ class BinauralSynth:
         occluded_waveforms, occlusion_mask = apply_occlusion_frequency_domain(
             waveforms,
             sample_rate=self.sample_rate,
+            herustic_occlusion_type="Random",
+            same_wall_across_batch=False,
             crit_freq_hz=crit_freq_hz.item(),
             crit_width_hz=crit_width_hz.item(),
             attenuation_dip_strength_db=attenuation_dip_strength_db.item(),
-            probability=0.0,
+            probability=1.0,
             device=self.device,
         )
         occluded_waveforms = occluded_waveforms.to(self.device)
@@ -186,9 +188,8 @@ class BinauralSynth:
         occlusion_mask_expanded = occlusion_mask.unsqueeze(1).bool()  # Shape: (N, 1)
         src_pos = torch.where(occlusion_mask_expanded, snapped_pos, src_pos)
 
-        mic_pos = torch.empty(label_len, 3, dtype=torch.float32).uniform_(0, 1).to(
-            self.device
-        ) * room_dim.unsqueeze(0)
+        mic_pos = torch.empty(1, 3, dtype=torch.float32).uniform_(0, 1).to(self.device)
+        mic_pos = mic_pos.repeat(label_len, 1) * room_dim.unsqueeze(0)
 
         relative_pos = src_pos - mic_pos
 
