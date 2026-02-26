@@ -77,7 +77,6 @@ def batch_fram_brir(
     mic_pos: Tensor = None,
     room_dim: Tensor = None,
     src_pos: Tensor = None,
-    n_reflection: Tensor = None,
     a: float = -2.0,
     b: float = 2.0,
     tau: float = 0.25,
@@ -92,7 +91,6 @@ def batch_fram_brir(
 
     Args:
         target_sr (int): Target sample rate for the output BRIR.
-        t60 (Tensor): Reverberation times in seconds, shape (B,).
         h_rir (RIRTensor): The head-related impulse response class that generates HRIRs.
         hrir_sr (int): Sample rate of the HRIR data. Default: 96000.
         mic_pos (Tensor): Microphone/receiver positions, shape (B, 3).
@@ -117,23 +115,14 @@ def batch_fram_brir(
         room_dim = torch.tensor([[4.0, 4.0, 4.0]], device=device)
     if src_pos is None:
         src_pos = torch.tensor([[1.0, 1.0, 1.0]], device=device)
-    if n_reflection is None:
-        n_reflection = torch.tensor([[100, 700]], device=device)
 
-    if (
-        mic_pos.shape[0] != room_dim.shape[0]
-        or mic_pos.shape[0] != src_pos.shape[0]
-        or mic_pos.shape[0] != n_reflection.shape[0]
-    ):
-        raise ValueError(
-            "mic_pos, room_dim, src_pos, t60, and n_reflection must have the same batch size"
-        )
+    if mic_pos.shape[0] != room_dim.shape[0] or mic_pos.shape[0] != src_pos.shape[0]:
+        raise ValueError("mic_pos, room_dim, src_pos must have the same batch size")
 
     # Move tensors to device
     mic_pos = mic_pos.to(device).float()
     src_pos = src_pos.to(device).float()
     room_dim = room_dim.to(device).float()
-    n_reflection = n_reflection.to(device)
 
     B = mic_pos.shape[0]
 

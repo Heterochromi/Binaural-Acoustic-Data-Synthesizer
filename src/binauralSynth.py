@@ -61,6 +61,9 @@ class BinauralSynth:
         sample_rate: int = 44100,
         subject_id: str = "D2",
         verbose: bool = True,
+        max_events_per_batch: int = 10,
+        max_intance_of_class_per_frame: int = 3,
+        frame_length_ms: float = 40,
         batch_size: int = 32,
         device: torch.device = torch.device("cpu"),
     ):
@@ -77,11 +80,54 @@ class BinauralSynth:
             "sadie/Database-Master_V2-1/D2/D2_HRIR_SOFA/D2_96K_24bit_512tap_FIR_SOFA.sofa",
             device=device,
         )
+        self.hrir_kernel_len = int(
+            self.hrirTensor.kernel_size * self.sample_rate / 96000
+        )
         self.batchHrir = BatchedHRIR(
             sample_rate=self.sample_rate,
             subject_id="D2",
             device=self.device,
         )
+        self.max_events_per_batch = max_events_per_batch
+        self.max_intance_of_class_per_frame = max_intance_of_class_per_frame
+        self.frame_length_ms = frame_length_ms
+        self.frame_length_samples = int(self.sample_rate * self.frame_length_ms / 1000)
+
+    def _load_waveforms(self, file_paths: List[str]):
+        waveforms = []
+        for file_path in file_paths:
+            waveform, sr = torchaudio.load(file_path)
+            if sr != self.sample_rate:
+                resampler = torchaudio.transforms.Resample(
+                    orig_freq=sr, new_freq=self.sample_rate
+                )
+                waveform = resampler(waveform)
+            # Convert stereo (or multi-channel) to mono by averaging channels
+            if waveform.shape[0] > 1:
+                waveform = waveform.mean(dim=0, keepdim=True)
+            waveform = waveform.squeeze(0)  # [T]
+            # Normalize
+            peak = waveform.abs().max()
+            if peak > 0:
+                waveform = waveform / peak
+            waveforms.append(waveform)
+
+        # Record original lengths before padding
+        lengths = torch.tensor([w.shape[0] for w in waveforms], dtype=torch.long)  # [B]
+        # Pad all waveforms to the longest length
+        max_len = lengths.max().item()
+        padded = []
+        for w in waveforms:
+            pad_amount = max_len - w.shape[0]
+            if pad_amount > 0:
+                w = torch.nn.functional.pad(
+                    w, (0, pad_amount), mode="constant", value=0
+                )
+            padded.append(w)
+        waveforms = torch.stack(padded, dim=0)  # [B, T]
+        waveforms = waveforms.to(self.device)
+        lengths = lengths.to(self.device)
+        return waveforms, lengths
 
     def _encode_waveforms(
         self,
@@ -125,7 +171,9 @@ class BinauralSynth:
         return labels
 
     @torch.no_grad()
-    def single_sample_auralize(self, waveforms: torch.Tensor, labels: List[str]):
+    def single_sample_auralize(self, waveform_paths: List[str], labels: List[str]):
+        waveforms, original_length = self._load_waveforms(waveform_paths)
+        print("original_length", original_length)
         waveforms, label_onehot = self._encode_waveforms(waveforms, labels)
         label_len = label_onehot.shape[0]
         # samples = torch.zeros(label_len, self.sample_length).to(self.device)
@@ -147,16 +195,14 @@ class BinauralSynth:
             crit_freq_hz=crit_freq_hz.item(),
             crit_width_hz=crit_width_hz.item(),
             attenuation_dip_strength_db=attenuation_dip_strength_db.item(),
-            probability=1.0,
+            probability=0.3,
             device=self.device,
         )
-        occluded_waveforms = occluded_waveforms.to(self.device)
-        occlusion_mask = occlusion_mask.to(self.device)
 
         room_dim_xz = (
-            torch.empty(1, dtype=torch.float32).uniform_(3, 10).to(self.device)
+            torch.empty(1, dtype=torch.float32).uniform_(3, 15).to(self.device)
         )
-        room_dim_y = torch.empty(1, dtype=torch.float32).uniform_(2, 3).to(self.device)
+        room_dim_y = torch.empty(1, dtype=torch.float32).uniform_(2, 4).to(self.device)
         room_dim = torch.cat([room_dim_xz, room_dim_y, room_dim_xz]).to(self.device)
         print(f"Room dimensions (x, y, z): {room_dim.cpu().numpy()} meters")
         src_pos = torch.empty(label_len, 3, dtype=torch.float32).uniform_(0, 1).to(
@@ -204,7 +250,7 @@ class BinauralSynth:
         ele_degree = torch.rad2deg(ele)
 
         hrirs = self.batchHrir.render_controlled_angel_hrir(
-            occluded_waveforms, azm_degree, ele_degree, mode="full"
+            occluded_waveforms, azm_degree, ele_degree
         )
 
         # apply distance attenuation to the direct sound
@@ -226,9 +272,9 @@ class BinauralSynth:
         #     .uniform_(0.3, 0.3)
         #     .to(self.device)
         # )
-        n_reflections = torch.randint(
-            300, 4000, (src_pos.shape[0], 2), dtype=torch.int32
-        ).to(self.device)
+        # n_reflections = torch.randint(
+        #     300, 4000, (src_pos.shape[0], 2), dtype=torch.int32
+        # ).to(self.device)
 
         room_dim_expanded = room_dim.unsqueeze(0).expand(mic_pos.shape[0], -1)
         reverb, valid_after_dry = batch_fram_brir(
@@ -236,7 +282,6 @@ class BinauralSynth:
             hrir_sr=96000,
             h_rir=self.hrirTensor,
             mic_pos=mic_pos,
-            n_reflection=n_reflections,
             src_pos=src_pos,
             room_dim=room_dim_expanded,
             reflection_chunk_size=100,
@@ -260,8 +305,77 @@ class BinauralSynth:
         )
 
         # Combine directional dry sound + wet reverb
-        final_output = hrirs_padded + final_wet_reverb
+        combined_samples = hrirs_padded + final_wet_reverb
 
-        print(final_output.shape)
+        n_events = combined_samples.shape[0]
 
-        return final_output
+        # --- Compute per-event valid lengths ---
+        #
+
+        # Per-event: how long the meaningful convolved signal actually is
+        # fftconvolve(original, reverb_brir, mode="full") -> original_length + brir_valid_len - 1
+        valid_total_len = (
+            original_length + valid_after_dry - 1
+        )  # (B,) wet end relative to event start
+        dry_len = (
+            original_length + self.hrir_kernel_len - 1
+        )  # (B,) dry end relative to event start
+
+        # Trim tensor to the longest valid event (remove guaranteed-zero tail)
+        max_valid = valid_total_len.max().item()
+        combined_samples = combined_samples[:, :, :max_valid]
+        print(f"Combined samples shape after trimming: {combined_samples.shape}")
+
+        max_offsets = (self.sample_length - valid_total_len).clamp(min=0)  # (B,)
+        max_offsets = torch.minimum(
+            max_offsets,
+            torch.tensor(int(self.sample_length * 0.8), device=self.device).expand(
+                n_events
+            ),
+        )
+        random_offsets = (
+            torch.rand(n_events, device=self.device) * max_offsets
+        ).long()  # (B,)
+        print(f"Random offsets (samples): {random_offsets.cpu().numpy()}")
+
+        final_waveform = torch.zeros(1, 2, self.sample_length, device=self.device)
+
+        # Vectorized placement: build index tensor for scatter_add
+        # For each event i, samples 0..valid_total_len[i]-1 go to offset[i]..offset[i]+valid_total_len[i]-1
+        trimmed_len = combined_samples.shape[-1]  # max_valid after trim
+        sample_idx = torch.arange(trimmed_len, device=self.device).unsqueeze(
+            0
+        )  # (1, max_valid)
+        target_idx = sample_idx + random_offsets.unsqueeze(1)  # (B, max_valid)
+
+        # Mask: only place samples that are (a) within this event's valid range AND (b) fit in final waveform
+        place_mask = (sample_idx < valid_total_len.unsqueeze(1)) & (
+            target_idx < self.sample_length
+        )
+        # Clamp target indices for scatter (invalid ones will be masked to 0 contribution)
+        target_idx = target_idx.clamp(0, self.sample_length - 1)  # (B, max_valid)
+
+        # Expand for 2 channels: target_idx -> (B, 1, max_valid) -> (B, 2, max_valid)
+        target_idx_2ch = target_idx.unsqueeze(1).expand(-1, 2, -1)
+        place_mask_2ch = place_mask.unsqueeze(1).expand(-1, 2, -1)
+
+        # Zero out invalid positions in combined_samples, then scatter_add
+        masked_samples = combined_samples * place_mask_2ch
+        # scatter_add into a (B, 2, sample_length) then sum across events
+        per_event = torch.zeros(n_events, 2, self.sample_length, device=self.device)
+        per_event.scatter_add_(2, target_idx_2ch, masked_samples)
+        final_waveform = per_event.sum(dim=0, keepdim=True)  # (1, 2, sample_length)
+
+        dry_end = (
+            random_offsets + dry_len
+        )  # (B,) this is where the dry sound ends after the random offset
+        wet_end = (
+            random_offsets + valid_total_len
+        )  # (B,) this is where the wet sound ends after the random offset
+
+        # Metadata tensor: [B, 2] -> columns are [dry_end, wet_end]
+        event_bounds = torch.stack([dry_end, wet_end], dim=1)  # (B, 2)
+        print(f"Event bounds (dry_end, wet_end): {event_bounds.cpu().numpy()}")
+        print(f"Final waveform shape: {final_waveform.shape}")
+
+        return final_waveform, event_bounds, label_onehot, random_offsets
