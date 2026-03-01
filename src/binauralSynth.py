@@ -157,11 +157,6 @@ class BinauralSynth:
         label_onehot = label_onehot.to(self.device)
         return waveforms, label_onehot
 
-    # def _batch_reverb(
-    #     self,
-    #     waveforms: torch.Tensor,
-    # ):
-
     def decode_label_onehot(
         self,
         label_onehot: torch.Tensor,
@@ -176,25 +171,25 @@ class BinauralSynth:
         print("original_length", original_length)
         waveforms, label_onehot = self._encode_waveforms(waveforms, labels)
         label_len = label_onehot.shape[0]
-        # samples = torch.zeros(label_len, self.sample_length).to(self.device)
-        crit_freq_hz = (
-            torch.empty(1, dtype=torch.float32).uniform_(300.0, 4000.0).to(self.device)
-        )
-        crit_width_hz = (
-            torch.empty(1, dtype=torch.float32).uniform_(800, 1600.0).to(self.device)
-        )
-        attenuation_dip_strength_db = (
-            torch.empty(1, dtype=torch.float32).uniform_(5.0, 15.0).to(self.device)
-        )
+
+        # crit_freq_hz = (
+        #     torch.empty(1, dtype=torch.float32).uniform_(300.0, 4000.0).to(self.device)
+        # )
+        # crit_width_hz = (
+        #     torch.empty(1, dtype=torch.float32).uniform_(800, 1600.0).to(self.device)
+        # )
+        # attenuation_dip_strength_db = (
+        #     torch.empty(1, dtype=torch.float32).uniform_(5.0, 15.0).to(self.device)
+        # )
 
         occluded_waveforms, occlusion_mask = apply_occlusion_frequency_domain(
             waveforms,
             sample_rate=self.sample_rate,
             herustic_occlusion_type="Random",
             same_wall_across_batch=False,
-            crit_freq_hz=crit_freq_hz.item(),
-            crit_width_hz=crit_width_hz.item(),
-            attenuation_dip_strength_db=attenuation_dip_strength_db.item(),
+            # crit_freq_hz=crit_freq_hz.item(),
+            # crit_width_hz=crit_width_hz.item(),
+            # attenuation_dip_strength_db=attenuation_dip_strength_db.item(),
             probability=0.3,
             device=self.device,
         )

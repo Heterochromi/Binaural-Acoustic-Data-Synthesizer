@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Literal, Optional
 
 import torch
 
@@ -39,9 +39,9 @@ def apply_occlusion_frequency_domain(
         "Heavy", "Wood", "Standard", "Rigid", "Random", None
     ] = None,
     same_wall_across_batch: bool = True,
-    crit_freq_hz: float = 4000.0,
-    crit_width_hz: float = 1000.0,
-    attenuation_dip_strength_db: float = 6.0,
+    crit_freq_hz: Optional[float] = 4000.0,
+    crit_width_hz: Optional[float] = 1000.0,
+    attenuation_dip_strength_db: Optional[float] = 6.0,
     probability: float = 1.0,
     device: torch.device = torch.device("cpu"),
 ):
