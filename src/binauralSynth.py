@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
 
 import torch
 import torchaudio
@@ -73,8 +73,6 @@ class BinauralSynth:
         self.batch_size = batch_size
         self.device = device
         self.label_names = label_names
-        self.label2id = {label: idx for idx, label in enumerate(label_names)}
-        self.id2label = {idx: label for label, idx in self.label2id.items()}
         self.sample_length = sample_rate * sample_total_length
         self.hrirTensor: RIRTensor = RIRTensor.from_sofa(
             "sadie/Database-Master_V2-1/D2/D2_HRIR_SOFA/D2_96K_24bit_512tap_FIR_SOFA.sofa",
@@ -92,10 +90,14 @@ class BinauralSynth:
         self.max_intance_of_class_per_frame = max_intance_of_class_per_frame
         self.frame_length_ms = frame_length_ms
         self.frame_length_samples = int(self.sample_rate * self.frame_length_ms / 1000)
+        self._waveform_cache: dict[str, torch.Tensor] = {}
 
     def _load_waveforms(self, file_paths: List[str]):
         waveforms = []
         for file_path in file_paths:
+            if file_path in self._waveform_cache:
+                waveforms.append(self._waveform_cache[file_path].clone())
+                continue
             waveform, sr = torchaudio.load(file_path)
             if sr != self.sample_rate:
                 resampler = torchaudio.transforms.Resample(
@@ -110,7 +112,8 @@ class BinauralSynth:
             peak = waveform.abs().max()
             if peak > 0:
                 waveform = waveform / peak
-            waveforms.append(waveform)
+            self._waveform_cache[file_path] = waveform
+            waveforms.append(waveform.clone())
 
         # Record original lengths before padding
         lengths = torch.tensor([w.shape[0] for w in waveforms], dtype=torch.long)  # [B]
@@ -129,48 +132,18 @@ class BinauralSynth:
         lengths = lengths.to(self.device)
         return waveforms, lengths
 
-    def _encode_waveforms(
-        self,
-        waveforms: torch.Tensor,
-        labels: List[str],
-    ):
-        """
-        Encode waveforms and labels into one-hot encoded tensors.
-
-        Args:
-            waveforms (torch.Tensor): Waveforms to encode.
-            labels (List[str]): Labels corresponding to the waveforms.
-
-        Returns:
-             torch.Tensor: with the waveforms and their corresponding encoded labels.
-        """
-        if len(waveforms) != len(labels):
-            raise ValueError("Waveforms and labels must have the same length")
-        label_indices = torch.tensor(
-            [self.label2id[label] for label in labels], dtype=torch.long
-        )
-        label_onehot = torch.nn.functional.one_hot(
-            label_indices, num_classes=len(self.label_names)
-        ).float()
-
-        waveforms = waveforms.to(self.device)
-        label_onehot = label_onehot.to(self.device)
-        return waveforms, label_onehot
-
-    def decode_label_onehot(
-        self,
-        label_onehot: torch.Tensor,
-    ):
-        label_indices = torch.argmax(label_onehot, dim=1)
-        labels = [self.id2label[idx] for idx in label_indices.tolist()]
-        return labels
-
     @torch.no_grad()
-    def single_sample_auralize(self, waveform_paths: List[str], labels: List[str]):
+    def single_sample_auralize(
+        self,
+        waveform_paths: List[str],
+        labels: List[str],
+        occlusion_probability: Optional[float] = 0.3,
+    ):
         waveforms, original_length = self._load_waveforms(waveform_paths)
         print("original_length", original_length)
-        waveforms, label_onehot = self._encode_waveforms(waveforms, labels)
-        label_len = label_onehot.shape[0]
+        if len(waveforms) != len(labels):
+            raise ValueError("Number of waveform paths must match number of labels")
+        label_len = len(labels)
 
         # crit_freq_hz = (
         #     torch.empty(1, dtype=torch.float32).uniform_(300.0, 4000.0).to(self.device)
@@ -190,7 +163,7 @@ class BinauralSynth:
             # crit_freq_hz=crit_freq_hz.item(),
             # crit_width_hz=crit_width_hz.item(),
             # attenuation_dip_strength_db=attenuation_dip_strength_db.item(),
-            probability=0.3,
+            probability=occlusion_probability,
             device=self.device,
         )
 
@@ -331,7 +304,6 @@ class BinauralSynth:
         random_offsets = (
             torch.rand(n_events, device=self.device) * max_offsets
         ).long()  # (B,)
-        print(f"Random offsets (samples): {random_offsets.cpu().numpy()}")
 
         final_waveform = torch.zeros(1, 2, self.sample_length, device=self.device)
 
@@ -373,4 +345,4 @@ class BinauralSynth:
         print(f"Event bounds (dry_end, wet_end): {event_bounds.cpu().numpy()}")
         print(f"Final waveform shape: {final_waveform.shape}")
 
-        return final_waveform, event_bounds, label_onehot, random_offsets
+        return final_waveform, event_bounds, random_offsets
