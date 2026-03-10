@@ -13,46 +13,6 @@ from .occlusionFilter import apply_occlusion_frequency_domain
 from .rirTensor import RIRTensor
 
 
-@dataclass
-class BinauralSynthConfig:
-    features: torch.Tensor  # [batch, channel, time]
-    positions: torch.Tensor  # Shape: (batch, num_sounds, 3) for x,y,z
-    labels: torch.Tensor  # Shape: (batch, num_sounds,num_labels) where the corresponding label will be 1 for that specific sound (one hot encoded)
-    timestamps: torch.Tensor  # Shape: (batch, num_sounds,)
-
-    @property
-    def batch_size(self) -> int:
-        return self.features.shape[0]
-
-    def to(self, device):
-        """Move all tensors to specified device"""
-        return BinauralSynthConfig(
-            features=self.features.to(device),
-            positions=self.positions.to(device),
-            labels=self.labels.to(device),
-            timestamps=self.timestamps.to(device),
-        )
-
-    def pin_memory(self):
-        """Pin memory for faster GPU transfer"""
-        return BinauralSynthConfig(
-            features=self.features.pin_memory(),
-            positions=self.positions.pin_memory(),
-            labels=self.labels.pin_memory(),
-            timestamps=self.timestamps.pin_memory(),
-        )
-
-    def __repr__(self):
-        return (
-            f"BinauralSynthBatch("
-            f"batch_size={self.batch_size}, "
-            f"features={tuple(self.features.shape)}, "
-            f"positions={tuple(self.positions.shape)}, "
-            f"labels={tuple(self.labels.shape)}, "
-            f"timestamps={tuple(self.timestamps.shape)})"
-        )
-
-
 class BinauralSynth:
     def __init__(
         self,
