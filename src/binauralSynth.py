@@ -23,7 +23,7 @@ class BinauralSynth:
         subject_id: str = "D2",
         verbose: bool = True,
         max_events_per_batch: int = 10,
-        max_intance_of_class_per_frame: int = 1,
+        max_intance_of_class_per_frame: int = 3,
         frame_length_ms: float = 40,
         batch_size: int = 32,
         device: torch.device = torch.device("cpu"),
