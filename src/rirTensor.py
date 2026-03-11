@@ -611,6 +611,11 @@ class RIRTensor:
         """Get shape of HRIR tensor."""
         return self.data.shape
 
+    @property
+    def kernel_size(self) -> int:
+        """Get tap length of HRIRs."""
+        return self.tap_length
+
     def to(self, device: Union[str, torch.device]) -> "RIRTensor":
         """Move all tensors to specified device."""
         self.device = torch.device(device)

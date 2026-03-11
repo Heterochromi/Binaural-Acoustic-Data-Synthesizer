@@ -68,6 +68,6 @@ def run_stress_test(num_sounds=1024, batch_size=32):
 
 if __name__ == "__main__":
     # Adjust these to stress test your specific hardware
-    TOTAL_SOUNDS = 20480
-    BATCH_SIZE = 1024
+    TOTAL_SOUNDS = 3560
+    BATCH_SIZE = 712
     run_stress_test(num_sounds=TOTAL_SOUNDS, batch_size=BATCH_SIZE)

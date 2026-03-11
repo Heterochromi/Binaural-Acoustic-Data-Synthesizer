@@ -1,85 +1,47 @@
+from typing import Literal, Optional
+
 import torch
-import torchaudio.functional as F_audio
 
-
-@torch.no_grad()
-def apply_occlusion(
-    waveforms: torch.Tensor,  # [B, T]
-    sample_rate: int,
-    base_attenuation_db: float = 10.0,
-    max_attenuation_db: float = 40.0,
-    crit_freq_hz: float = 1500.0,
-    crit_width_hz: float = 1000.0,
-    attenuation_dip_strength_db: float = 5.0,
-    probability: float = 1,
-    device: torch.device = torch.device("cpu"),
-):
-    """
-    This is a simple audio occlusion filter that tries to mimic real world single panel sound transmission loss.
-
-    Args:
-        waveforms (torch.Tensor): Input audio waveforms.
-        sample_rate (int): Sample rate of the audio signal.
-        base_attenuation_db (float): Base attenuation in decibels.
-        max_attenuation_db (float): Maximum attenuation in decibels.
-        crit_freq_hz (float): Critical frequency in Hz.
-        crit_width_hz (float): Critical width in Hz.
-        attenuation_dip_strength_db (float): Attenuation dip strength in decibels.
-        probability (float): Probability of applying occlusion per waveform.
-        device (torch.device): Device to run the computation on.
-
-    Returns:
-        torch.Tensor: Filtered audio waveform.
-        torch.Tensor: Mask indicating which waveforms were occluded.
-    """
-    if probability < 0 or probability > 1:
-        raise ValueError("probability must be between 0 and 1")
-
-    waveforms = waveforms.to(device)
-    original_waveforms = waveforms.clone()
-
-    # Create mask for which waveforms to apply occlusion to [B, 1]
-    batch_size = waveforms.shape[0] if waveforms.dim() > 1 else 1
-    apply_mask = (
-        (torch.rand(batch_size, device=device) < probability).float().unsqueeze(-1)
-    )
-    base_gain = 10.0 ** (-base_attenuation_db / 20.0)
-    waveforms = waveforms * base_gain
-
-    nyquist = sample_rate / 2
-
-    target_gain = 10.0 ** (-max_attenuation_db / 20.0)
-    fc = nyquist / torch.sqrt(torch.tensor((1 / target_gain**2) - 1))
-
-    waveforms = F_audio.lowpass_biquad(
-        waveforms,
-        sample_rate,
-        cutoff_freq=fc,
-        Q=0.5,
-    )
-
-    Q_factor = crit_freq_hz / crit_width_hz
-    waveforms = F_audio.equalizer_biquad(
-        waveforms,
-        sample_rate,
-        center_freq=crit_freq_hz,
-        gain=attenuation_dip_strength_db,
-        Q=Q_factor,
-    )
-
-    # Blend between original and processed based on mask
-    waveforms = apply_mask * waveforms + (1 - apply_mask) * original_waveforms
-
-    return waveforms, apply_mask.squeeze(1)
+# Material Type,Center Freq. (fc​) Range,Total Width Range (Hz),Dip Depth Range,Physical Characteristics
+# "Heavy/Masonry (Concrete, Brick, Cinderblock)",100 Hz – 300 Hz,100 Hz – 500 Hz,5 dB – 10 dB,Shallow and narrow in linear Hz. High mass and high internal damping kill the dip quickly.
+# "Wood/Timber (Plywood, OSB, Solid Doors)","1,000 Hz – 2,000 Hz","800 Hz – 2,500 Hz",10 dB – 15 dB,Wood is stiff but light. The dip sits right in the lower midrange.
+# "Standard Walls (Drywall, Gypsum, Plaster)","2,500 Hz – 3,200 Hz","1,500 Hz – 3,500 Hz",8 dB – 15 dB,"The classic residential wall. Less rigid, pushing the dip higher up into the sensitive hearing range."
+# "Rigid/Thin (Glass, Sheet Metal, Acrylic)","1,000 Hz – 4,000 Hz","1,000 Hz – 4,000 Hz",12 dB – 20 dB,"Severe, sharp, and deep. Low internal damping means the material rings like a bell at the coincidence frequency."
+herustic_random_occlusion_params = {
+    "Heavy": {
+        "crit_freq_hz": [100, 300],
+        "attenuation_dip_strength_db": [5, 10],
+        "crit_width_hz": [100, 500],
+    },
+    "Wood": {
+        "crit_freq_hz": [1000, 2000],
+        "attenuation_dip_strength_db": [10, 15],
+        "crit_width_hz": [800, 2500],
+    },
+    "Standard": {
+        "crit_freq_hz": [2500, 3200],
+        "attenuation_dip_strength_db": [8, 15],
+        "crit_width_hz": [1500, 3500],
+    },
+    "Rigid": {
+        "crit_freq_hz": [1000, 4000],
+        "attenuation_dip_strength_db": [12, 20],
+        "crit_width_hz": [1000, 4000],
+    },
+}
 
 
 @torch.no_grad()
 def apply_occlusion_frequency_domain(
     waveforms: torch.Tensor,  # [B, T]
     sample_rate: int,
-    crit_freq_hz: float = 4000.0,
-    crit_width_hz: float = 1000.0,
-    attenuation_dip_strength_db: float = 6.0,
+    herustic_occlusion_type: Literal[
+        "Heavy", "Wood", "Standard", "Rigid", "Random", None
+    ] = None,
+    same_wall_across_batch: bool = True,
+    crit_freq_hz: Optional[float] = 4000.0,
+    crit_width_hz: Optional[float] = 1000.0,
+    attenuation_dip_strength_db: Optional[float] = 6.0,
     probability: float = 1.0,
     device: torch.device = torch.device("cpu"),
 ):
@@ -103,6 +65,16 @@ def apply_occlusion_frequency_domain(
     if probability < 0 or probability > 1:
         raise ValueError("probability must be between 0 and 1")
 
+    if herustic_occlusion_type is not None:
+        print(
+            f"occlusion type is set, therefor crit_freq_hz,crit_width_hz, attenuation_dip_strength_db will be ignored and set according to the occlusion type of {herustic_occlusion_type}"
+        )
+    else:
+        print(
+            "same_wall_across_batch will always be true because occlusion type is None"
+        )
+        same_wall_across_batch = True
+
     waveforms = waveforms.to(device)
     original_waveforms = waveforms.clone()
     batch_size = waveforms.shape[0]
@@ -112,7 +84,82 @@ def apply_occlusion_frequency_domain(
 
     apply_mask = (torch.rand(batch_size, device=device) < probability).float()
 
-    freqs = torch.linspace(0, sample_rate / 2, n_fft // 2 + 1, device=device)
+    # Sample occlusion parameters from heuristic ranges if applicable
+    if herustic_occlusion_type is not None:
+        material_types = list(herustic_random_occlusion_params.keys())
+
+        if herustic_occlusion_type == "Random":
+            if same_wall_across_batch:
+                chosen_idx = torch.randint(len(material_types), (1,)).item()
+                chosen = material_types[chosen_idx]
+                p = herustic_random_occlusion_params[chosen]
+                crit_freq_hz = (
+                    torch.empty(1, device=device).uniform_(*p["crit_freq_hz"]).item()
+                )
+                crit_width_hz = (
+                    torch.empty(1, device=device).uniform_(*p["crit_width_hz"]).item()
+                )
+                attenuation_dip_strength_db = (
+                    torch.empty(1, device=device)
+                    .uniform_(*p["attenuation_dip_strength_db"])
+                    .item()
+                )
+            else:
+                type_indices = torch.randint(len(material_types), (batch_size,))
+                crit_freq_hz_list = []
+                crit_width_hz_list = []
+                atten_list = []
+                for i in range(batch_size):
+                    chosen = material_types[type_indices[i].item()]
+                    p = herustic_random_occlusion_params[chosen]
+                    crit_freq_hz_list.append(
+                        torch.empty(1).uniform_(*p["crit_freq_hz"]).item()
+                    )
+                    crit_width_hz_list.append(
+                        torch.empty(1).uniform_(*p["crit_width_hz"]).item()
+                    )
+                    atten_list.append(
+                        torch.empty(1)
+                        .uniform_(*p["attenuation_dip_strength_db"])
+                        .item()
+                    )
+                crit_freq_hz = torch.tensor(crit_freq_hz_list, device=device).unsqueeze(
+                    1
+                )  # [B, 1]
+                crit_width_hz = torch.tensor(
+                    crit_width_hz_list, device=device
+                ).unsqueeze(1)  # [B, 1]
+                attenuation_dip_strength_db = torch.tensor(
+                    atten_list, device=device
+                ).unsqueeze(1)  # [B, 1]
+        else:
+            p = herustic_random_occlusion_params[herustic_occlusion_type]
+            if same_wall_across_batch:
+                crit_freq_hz = (
+                    torch.empty(1, device=device).uniform_(*p["crit_freq_hz"]).item()
+                )
+                crit_width_hz = (
+                    torch.empty(1, device=device).uniform_(*p["crit_width_hz"]).item()
+                )
+                attenuation_dip_strength_db = (
+                    torch.empty(1, device=device)
+                    .uniform_(*p["attenuation_dip_strength_db"])
+                    .item()
+                )
+            else:
+                crit_freq_hz = torch.empty(batch_size, 1, device=device).uniform_(
+                    *p["crit_freq_hz"]
+                )  # [B, 1]
+                crit_width_hz = torch.empty(batch_size, 1, device=device).uniform_(
+                    *p["crit_width_hz"]
+                )  # [B, 1]
+                attenuation_dip_strength_db = torch.empty(
+                    batch_size, 1, device=device
+                ).uniform_(*p["attenuation_dip_strength_db"])  # [B, 1]
+
+    freqs = torch.linspace(0, sample_rate / 2, n_fft // 2 + 1, device=device).unsqueeze(
+        0
+    )  # [1, F]
 
     # 1. Low frequency mask (0 to crit_freq_hz): 6dB per octave
 
@@ -145,10 +192,10 @@ def apply_occlusion_frequency_domain(
     # FFT of waveforms
     waveforms_fft = torch.fft.rfft(waveforms, n=n_fft)  # [B, n_fft // 2 + 1]
 
-    # Multiply by frequency mask
-    filtered_fft = waveforms_fft * freq_mask.unsqueeze(0)  # [B, n_fft // 2 + 1]
+    # Multiply by frequency mask (freq_mask is [1, F] or [B, F], broadcasts with [B, F])
+    filtered_fft = waveforms_fft * freq_mask  # [B, n_fft // 2 + 1]
 
-    # Inverse FFT
+    # Inverse FFT back to time domain
     filtered_waveforms = torch.fft.irfft(filtered_fft, n=n_fft)  # [B, n_fft]
 
     # Trim to original length
