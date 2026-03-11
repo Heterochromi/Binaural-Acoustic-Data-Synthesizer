@@ -11,6 +11,7 @@ from .batchedHrir import BatchedHRIR
 # from .framRir import fram_brir
 from .occlusionFilter import apply_occlusion_frequency_domain
 from .rirTensor import RIRTensor
+from .smartRandomizedPlacement import SmartRandomizedPlacement
 
 
 class BinauralSynth:
@@ -22,7 +23,7 @@ class BinauralSynth:
         subject_id: str = "D2",
         verbose: bool = True,
         max_events_per_batch: int = 10,
-        max_intance_of_class_per_frame: int = 3,
+        max_intance_of_class_per_frame: int = 1,
         frame_length_ms: float = 40,
         batch_size: int = 32,
         device: torch.device = torch.device("cpu"),
@@ -33,7 +34,7 @@ class BinauralSynth:
         self.batch_size = batch_size
         self.device = device
         self.label_names = label_names
-        self.sample_length = sample_rate * sample_total_length
+        self.sample_length = int(sample_rate * sample_total_length)
         self.hrirTensor: RIRTensor = RIRTensor.from_sofa(
             "sadie/Database-Master_V2-1/D2/D2_HRIR_SOFA/D2_96K_24bit_512tap_FIR_SOFA.sofa",
             device=device,
@@ -49,7 +50,9 @@ class BinauralSynth:
         self.max_events_per_batch = max_events_per_batch
         self.max_intance_of_class_per_frame = max_intance_of_class_per_frame
         self.frame_length_ms = frame_length_ms
-        self.frame_length_samples = int(self.sample_rate * self.frame_length_ms / 1000)
+        self.frame_length_samples = int(
+            self.sample_rate * (self.frame_length_ms / 1000)
+        )
         self._waveform_cache: dict[str, torch.Tensor] = {}
 
     def _load_waveforms(self, file_paths: List[str]):
@@ -97,7 +100,8 @@ class BinauralSynth:
         self,
         waveform_paths: List[str],
         labels: List[str],
-        occlusion_probability: Optional[float] = 0.3,
+        occlusion_probability: Optional[float] = 0.5,
+        reverb_probability: Optional[float] = 1,
     ):
         waveforms, original_length = self._load_waveforms(waveform_paths)
         print("original_length", original_length)
@@ -105,32 +109,17 @@ class BinauralSynth:
             raise ValueError("Number of waveform paths must match number of labels")
         label_len = len(labels)
 
-        # crit_freq_hz = (
-        #     torch.empty(1, dtype=torch.float32).uniform_(300.0, 4000.0).to(self.device)
-        # )
-        # crit_width_hz = (
-        #     torch.empty(1, dtype=torch.float32).uniform_(800, 1600.0).to(self.device)
-        # )
-        # attenuation_dip_strength_db = (
-        #     torch.empty(1, dtype=torch.float32).uniform_(5.0, 15.0).to(self.device)
-        # )
-
         occluded_waveforms, occlusion_mask = apply_occlusion_frequency_domain(
             waveforms,
             sample_rate=self.sample_rate,
             herustic_occlusion_type="Random",
             same_wall_across_batch=False,
-            # crit_freq_hz=crit_freq_hz.item(),
-            # crit_width_hz=crit_width_hz.item(),
-            # attenuation_dip_strength_db=attenuation_dip_strength_db.item(),
             probability=occlusion_probability,
             device=self.device,
         )
 
-        room_dim_xz = (
-            torch.empty(1, dtype=torch.float32).uniform_(3, 15).to(self.device)
-        )
-        room_dim_y = torch.empty(1, dtype=torch.float32).uniform_(2, 4).to(self.device)
+        room_dim_xz = torch.empty(1, dtype=torch.float32).uniform_(3, 6).to(self.device)
+        room_dim_y = torch.empty(1, dtype=torch.float32).uniform_(2, 3).to(self.device)
         room_dim = torch.cat([room_dim_xz, room_dim_y, room_dim_xz]).to(self.device)
         print(f"Room dimensions (x, y, z): {room_dim.cpu().numpy()} meters")
         src_pos = torch.empty(label_len, 3, dtype=torch.float32).uniform_(0, 1).to(
@@ -203,48 +192,49 @@ class BinauralSynth:
         # n_reflections = torch.randint(
         #     300, 4000, (src_pos.shape[0], 2), dtype=torch.int32
         # ).to(self.device)
+        #
+        if (torch.rand(1) < reverb_probability).item():
+            room_dim_expanded = room_dim.unsqueeze(0).expand(mic_pos.shape[0], -1)
+            reverb, valid_after_dry = batch_fram_brir(
+                target_sr=self.sample_rate,
+                hrir_sr=96000,
+                h_rir=self.hrirTensor,
+                mic_pos=mic_pos,
+                src_pos=src_pos,
+                room_dim=room_dim_expanded,
+                reflection_chunk_size=100,
+                device=self.device,
+            )
+            reverb_left = reverb[:, 0]
+            reverb_right = reverb[:, 1]
 
-        room_dim_expanded = room_dim.unsqueeze(0).expand(mic_pos.shape[0], -1)
-        reverb, valid_after_dry = batch_fram_brir(
-            target_sr=self.sample_rate,
-            hrir_sr=96000,
-            h_rir=self.hrirTensor,
-            mic_pos=mic_pos,
-            src_pos=src_pos,
-            room_dim=room_dim_expanded,
-            reflection_chunk_size=100,
-            device=self.device,
-        )
-        reverb_left = reverb[:, 0]
-        reverb_right = reverb[:, 1]
+            left_reverb = torchaudio.functional.fftconvolve(
+                occluded_waveforms, reverb_left, mode="full"
+            )
+            right_reverb = torchaudio.functional.fftconvolve(
+                occluded_waveforms, reverb_right, mode="full"
+            )
+            final_wet_reverb = torch.stack([left_reverb, right_reverb], dim=1)
 
-        left_reverb = torchaudio.functional.fftconvolve(
-            occluded_waveforms, reverb_left, mode="full"
-        )
-        right_reverb = torchaudio.functional.fftconvolve(
-            occluded_waveforms, reverb_right, mode="full"
-        )
-        final_wet_reverb = torch.stack([left_reverb, right_reverb], dim=1)
+            # Pad hrirs on the right to match final_wet_reverb shape
+            pad_amount = final_wet_reverb.shape[-1] - hrirs.shape[-1]
+            hrirs_padded = torch.nn.functional.pad(
+                hrirs, (0, pad_amount), mode="constant", value=0
+            )
 
-        # Pad hrirs on the right to match final_wet_reverb shape
-        pad_amount = final_wet_reverb.shape[-1] - hrirs.shape[-1]
-        hrirs_padded = torch.nn.functional.pad(
-            hrirs, (0, pad_amount), mode="constant", value=0
-        )
+            # Combine directional dry sound + wet reverb
+            combined_samples = hrirs_padded + final_wet_reverb
 
-        # Combine directional dry sound + wet reverb
-        combined_samples = hrirs_padded + final_wet_reverb
+            # fftconvolve(original, reverb_brir, mode="full") -> original_length + brir_valid_len - 1
+            valid_total_len = (
+                original_length + valid_after_dry - 1
+            )  # (B,) wet end relative to event start
+        else:
+            combined_samples = hrirs
+            valid_total_len = original_length + self.hrir_kernel_len - 1
 
         n_events = combined_samples.shape[0]
 
-        # --- Compute per-event valid lengths ---
-        #
-
-        # Per-event: how long the meaningful convolved signal actually is
-        # fftconvolve(original, reverb_brir, mode="full") -> original_length + brir_valid_len - 1
-        valid_total_len = (
-            original_length + valid_after_dry - 1
-        )  # (B,) wet end relative to event start
         dry_len = (
             original_length + self.hrir_kernel_len - 1
         )  # (B,) dry end relative to event start
@@ -254,16 +244,28 @@ class BinauralSynth:
         combined_samples = combined_samples[:, :, :max_valid]
         print(f"Combined samples shape after trimming: {combined_samples.shape}")
 
-        max_offsets = (self.sample_length - valid_total_len).clamp(min=0)  # (B,)
-        max_offsets = torch.minimum(
-            max_offsets,
-            torch.tensor(int(self.sample_length * 0.8), device=self.device).expand(
-                n_events
-            ),
+        # Build a mapping from event index -> placement start; track which were skipped
+        offset_list = [0] * label_len
+        skipped_mask = torch.zeros(label_len, dtype=torch.bool, device=self.device)
+        placement_controller = SmartRandomizedPlacement(
+            sample_total_length=self.sample_length,
+            sample_rate=self.sample_rate,
+            frame_ms=self.frame_length_ms,
+            max_per_frame=self.max_intance_of_class_per_frame,
         )
-        random_offsets = (
-            torch.rand(n_events, device=self.device) * max_offsets
-        ).long()  # (B,)
+        for i in range(label_len):
+            result = placement_controller.try_insert_sound(labels[i], dry_len[i].item())
+            if result is not None:
+                offset_list[i] = result[-1]["start"]
+                result[-1]["position"] = relative_pos[i].tolist()
+                result[-1]["reverb_end"] = offset_list[i] + valid_total_len[i].item()
+            else:
+                skipped_mask[i] = True  # flag so we zero out this event's contribution
+
+        # Zero out combined_samples for skipped events so they contribute nothing to the mix
+        combined_samples[skipped_mask] = 0.0
+
+        random_offsets = torch.tensor(offset_list, dtype=torch.long, device=self.device)
 
         final_waveform = torch.zeros(1, 2, self.sample_length, device=self.device)
 
@@ -276,9 +278,8 @@ class BinauralSynth:
         target_idx = sample_idx + random_offsets.unsqueeze(1)  # (B, max_valid)
 
         # Mask: only place samples that are (a) within this event's valid range AND (b) fit in final waveform
-        place_mask = (sample_idx < valid_total_len.unsqueeze(1)) & (
-            target_idx < self.sample_length
-        )
+        place_mask = sample_idx < valid_total_len.unsqueeze(1)
+
         # Clamp target indices for scatter (invalid ones will be masked to 0 contribution)
         target_idx = target_idx.clamp(0, self.sample_length - 1)  # (B, max_valid)
 
@@ -293,16 +294,8 @@ class BinauralSynth:
         per_event.scatter_add_(2, target_idx_2ch, masked_samples)
         final_waveform = per_event.sum(dim=0, keepdim=True)  # (1, 2, sample_length)
 
-        dry_end = (
-            random_offsets + dry_len
-        )  # (B,) this is where the dry sound ends after the random offset
-        wet_end = (
-            random_offsets + valid_total_len
-        )  # (B,) this is where the wet sound ends after the random offset
-
         # Metadata tensor: [B, 2] -> columns are [dry_end, wet_end]
-        event_bounds = torch.stack([dry_end, wet_end], dim=1)  # (B, 2)
-        print(f"Event bounds (dry_end, wet_end): {event_bounds.cpu().numpy()}")
+        # event_bounds = torch.stack([dry_end, wet_end], dim=1)  # (B, 2)
         print(f"Final waveform shape: {final_waveform.shape}")
 
-        return final_waveform, event_bounds, random_offsets
+        return final_waveform, placement_controller.placements
