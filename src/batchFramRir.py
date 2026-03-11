@@ -172,44 +172,57 @@ def compute_late_transition(room_dim, velocity=343.0):
 def compute_reflection_lowpass_freq(
     dist: Tensor,
     t60: Tensor,
-    velocity: float = 343.0,
-    f_ref: float = 12000.0,
-    air_absorption_coeff: float = 0.02,
+    air_absorption_coeff: Tensor,  # now (B,) not scalar
+    f_ref: Tensor,  # now (B,) not scalar
 ) -> Tensor:
+    absorption_rate = air_absorption_coeff.unsqueeze(1) / t60.unsqueeze(1)  # (B, 1)
+    cutoff = f_ref.unsqueeze(1) * torch.exp(-absorption_rate * dist)  # (B, chunk_size)
+    return cutoff.clamp(min=200.0)
+
+
+def compute_absorption_params(
+    room_dim: Tensor,
+    t60: Tensor,
+) -> tuple[Tensor, Tensor]:
     """
-    Compute per-reflection lowpass cutoff frequency based on distance traveled.
+    Derive frequency-dependent absorption parameters from room geometry and T60.
 
-    Models combined air absorption and surface absorption frequency dependence.
+    Based on Sabine equation: T60 = 0.161 * V / (S * mean_absorption)
 
-    Air absorption in dB/m ≈ air_absorption_coeff * f² / 1e6
-    This means high frequencies lose energy faster with distance.
-
-    We model this as a lowpass filter whose cutoff drops with distance:
-        f_cutoff = f_ref * exp(-alpha * dist)
-
-    where alpha controls how fast HF rolls off with distance.
+    Rooms with high absorption (low T60 relative to volume) →
+        more absorptive surfaces → stronger HF decay, lower brightness ceiling
+    Rooms with low absorption (high T60 relative to volume) →
+        reflective surfaces → weaker HF decay, higher brightness ceiling
 
     Args:
-        dist: (B, chunk_size) — total path length of each reflection in meters
-        t60: (B,) — reverberation time
-        velocity: speed of sound
-        f_ref: starting cutoff frequency for zero-distance reflection
-        air_absorption_coeff: controls HF decay rate with distance
+        room_dim: (B, 3) room dimensions in meters
+        t60: (B,) reverberation time in seconds
 
     Returns:
-        cutoff_freqs: (B, chunk_size) — lowpass cutoff frequency per reflection in Hz
+        air_absorption_coeff: (B,) per-room absorption coefficient
+        f_ref: (B,) per-room reference cutoff frequency in Hz
     """
-    # Scale absorption by room liveness — lively rooms (high T60) have
-    # less absorptive surfaces, so frequency-dependent decay is slower
-    # Dry rooms (low T60) have more absorption, faster HF decay
-    absorption_rate = air_absorption_coeff / t60.unsqueeze(1)  # (B, chunk_size)
+    V = room_dim[:, 0] * room_dim[:, 1] * room_dim[:, 2]  # (B,)
+    S = 2.0 * (
+        room_dim[:, 0] * room_dim[:, 1]
+        + room_dim[:, 1] * room_dim[:, 2]
+        + room_dim[:, 0] * room_dim[:, 2]
+    )  # (B,) total surface area
 
-    cutoff = f_ref * torch.exp(-absorption_rate * dist)
+    # Sabine mean absorption coefficient
+    mean_absorption = 0.161 * V / (S * t60 + 1e-8)  # (B,) typically 0.01 - 0.6
+    mean_absorption = mean_absorption.clamp(0.01, 0.6)
 
-    # Clamp to reasonable range
-    cutoff = cutoff.clamp(min=200.0, max=f_ref)
+    # High absorption surfaces lose more HF per bounce
+    # Map mean_absorption [0.01, 0.6] → air_absorption_coeff [0.005, 0.04]
+    air_absorption_coeff = 0.005 + 0.058 * mean_absorption  # (B,)
 
-    return cutoff
+    # Bright rooms (low absorption) have high f_ref, dead rooms have low f_ref
+    # Map mean_absorption [0.01, 0.6] → f_ref [16000, 6000]
+    f_ref = 16000.0 - 16700.0 * mean_absorption  # (B,)
+    f_ref = f_ref.clamp(min=4000.0, max=16000.0)
+
+    return air_absorption_coeff, f_ref
 
 
 def apply_freq_dependent_decay(
@@ -331,9 +344,9 @@ def batch_fram_brir(
 
     hrir_len_up = hrir_len * oversample
 
-    t60 = torch.empty(B, device=device).uniform_(1.5, 1.5)
+    t60 = torch.empty(B, device=device).uniform_(0.3, 0.9)
     # density varies ±15% for room character diversity
-    density = torch.empty(B, device=device).uniform_(2000, 10000)
+    density = torch.empty(B, device=device).uniform_(5000, 20000)
     image_counts = (density * t60).int()  # (B,)a
     print("Image counts per batch item:", image_counts)
     print("t60", t60)
@@ -467,7 +480,7 @@ def batch_fram_brir(
         )
 
         # Gains
-        gains = reflect_coef.unsqueeze(1).pow(reflect_ratio) / dist * 2
+        gains = reflect_coef.unsqueeze(1).pow(reflect_ratio) / dist
 
         # Compute time delays
         path_diff = dist - direct_dist.unsqueeze(1)
@@ -505,7 +518,10 @@ def batch_fram_brir(
         # is_late = blend >= 1.0
         # is_early = ~is_late
         #
-        cutoff_freqs = compute_reflection_lowpass_freq(dist, t60, velocity)
+        air_absorption_coeff, f_ref = compute_absorption_params(room_dim, t60)
+        cutoff_freqs = compute_reflection_lowpass_freq(
+            dist, t60, air_absorption_coeff, f_ref
+        )
 
         left_hrirs = apply_freq_dependent_decay(left_hrirs, cutoff_freqs, working_sr)
         right_hrirs = apply_freq_dependent_decay(right_hrirs, cutoff_freqs, working_sr)
