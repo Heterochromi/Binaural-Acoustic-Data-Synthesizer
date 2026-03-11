@@ -101,7 +101,7 @@ class BinauralSynth:
         waveform_paths: List[str],
         labels: List[str],
         occlusion_probability: Optional[float] = 0.5,
-        reverb_probability: Optional[float] = 1,
+        reverb_probability: Optional[float] = 0.7,
     ):
         waveforms, original_length = self._load_waveforms(waveform_paths)
         print("original_length", original_length)
