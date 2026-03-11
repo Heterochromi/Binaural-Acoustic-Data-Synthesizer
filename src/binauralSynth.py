@@ -75,6 +75,7 @@ class BinauralSynth:
             peak = waveform.abs().max()
             if peak > 0:
                 waveform = waveform / peak
+            waveform = waveform.to(self.device)
             self._waveform_cache[file_path] = waveform
             waveforms.append(waveform.clone())
 
@@ -180,21 +181,6 @@ class BinauralSynth:
 
         hrirs = hrirs * gain.unsqueeze(-1).unsqueeze(-1)
 
-        # note for later, in order to make reverb more realistic we need to scale n_reflections with t_60,
-        # because a long t60 and low n_reflections will make it sound like  the same sound played many time over when its reverb,
-        # while many n_reflections in a short t_60 will play so many reflections at the same time to the point where it will over power the original sound and hide it,
-        # making localization impossible.
-        # done for now, by scaling t60 inside the fram function depending on a random logical density of reflections.
-
-        # t60 = (
-        #     torch.empty(src_pos.shape[0], dtype=torch.float32)
-        #     .uniform_(0.3, 0.3)
-        #     .to(self.device)
-        # )
-        # n_reflections = torch.randint(
-        #     300, 4000, (src_pos.shape[0], 2), dtype=torch.int32
-        # ).to(self.device)
-        #
         if (torch.rand(1) < reverb_probability).item():
             room_dim_expanded = room_dim.unsqueeze(0).expand(mic_pos.shape[0], -1)
             reverb, valid_after_dry = batch_fram_brir(
@@ -204,7 +190,7 @@ class BinauralSynth:
                 mic_pos=mic_pos,
                 src_pos=src_pos,
                 room_dim=room_dim_expanded,
-                reflection_chunk_size=100,
+                reflection_chunk_size=120,
                 device=self.device,
             )
             reverb_left = reverb[:, 0]
@@ -261,6 +247,7 @@ class BinauralSynth:
                 offset_list[i] = result[-1]["start"]
                 result[-1]["position"] = relative_pos[i].tolist()
                 result[-1]["reverb_end"] = offset_list[i] + valid_total_len[i].item()
+                result[-1]["gain"] = gain[i].item()
             else:
                 skipped_mask[i] = True  # flag so we zero out this event's contribution
 
