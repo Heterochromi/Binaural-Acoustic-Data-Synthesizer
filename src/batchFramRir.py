@@ -344,7 +344,7 @@ def batch_fram_brir(
 
     hrir_len_up = hrir_len * oversample
 
-    t60 = torch.empty(B, device=device).uniform_(0.3, 0.9)
+    t60 = torch.empty(B, device=device).uniform_(0.3, 1)
     # density varies ±15% for room character diversity
     density = torch.empty(B, device=device).uniform_(5000, 20000)
     image_counts = (density * t60).int()  # (B,)a

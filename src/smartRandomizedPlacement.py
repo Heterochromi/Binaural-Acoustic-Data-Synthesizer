@@ -89,7 +89,7 @@ class SmartRandomizedPlacement:
                 "class": sound_class,
                 "start": chosen_start,
                 "end": chosen_start + duration_samples,
-                "frames": list(affected_frames),
+                "frames": affected_frames,
             }
         )
 
