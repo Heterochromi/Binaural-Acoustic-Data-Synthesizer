@@ -12,6 +12,8 @@
 !src/binauralSynth.py
 !src/occlusionFilter.py
 !src/batchFramRir.py
+!src/smartRandomizedPlacenment.py
 
 !LICENSE
 !benchmark_synth.py
+!script.py
