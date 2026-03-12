@@ -12,7 +12,7 @@ CITATION: Luo, Y., & Gu, R. (2024, April). Fast random approximation of multi-ch
 
 import torch
 from torch import Tensor
-from torchaudio.functional import allpass_biquad, highpass_biquad, lowpass_biquad
+from torchaudio.functional import highpass_biquad
 from torchaudio.transforms import Resample
 
 from .rirTensor import RIRTensor
@@ -64,109 +64,6 @@ def dist_first_order_reflection_batch(
     min_reflection_dist = torch.min(dists, dim=1).values  # (B,)
 
     return min_reflection_dist
-
-
-@torch.no_grad()
-def compute_late_transition(room_dim, velocity=343.0):
-    """
-    Computes the transition zone for early to late reverberation based on
-    the echo density thresholds which show us when the late reverb statistically emerges highlighted in Abel & Huang (2006) that then get plugged into
-    Kuttruff, Heinrich's formula for the average rate of refections received in a point of a real rectangular or ISM.
-
-    original formula: 4π * c^3 * t^2 / V = average rate of received reflections.
-    we solve for time instead.
-    """
-    # Calculate volume from room dimensions
-    V = room_dim[:, 0] * room_dim[:, 1] * room_dim[:, 2]
-
-    # The constant denominator for the expanding sound sphere: 4π * c^3
-    denominator = 4.0 * torch.pi * (velocity**3)
-
-    # --- Onset of Transition ---
-    # Reflections start to overlap significantly, but aren't fully Gaussian.
-    # The paper notes a statistical field begins forming around 2000 echoes/s.
-    rho_onset = 2000
-    t_onset = torch.sqrt(rho_onset * V / denominator)
-
-    # --- Complete Late Field ---
-    # The threshold where echoes exceed ~4000/s and can be treated as
-    # statistically independent (Gaussian noise). The texture becomes "sandy".
-    rho_late = 4000.0
-    t_late = torch.sqrt(rho_late * V / denominator)
-
-    # Clamp to practical minimum/maximum times in seconds to prevent
-    # mathematical extremes in very small or massive virtual spaces.
-    t_onset = t_onset.clamp(min=0.010, max=0.080)
-    t_late = t_late.clamp(min=0.025, max=0.150)
-
-    # Ensure the late time is strictly after the onset
-    t_late = torch.max(t_late, t_onset * 1.3)
-
-    return t_onset, t_late
-
-
-# ALLPASS_CENTER_FREQS = [250.0, 700.0, 1800.0, 4500.0, 9000.0, 16000.0]
-
-
-# def apply_allpass_decorrelation(
-#     hrirs: Tensor,
-#     blend: Tensor,
-#     sr: int,
-#     center_freqs: list[float] = ALLPASS_CENTER_FREQS,
-#     q_max: float = 50.0,
-#     q_min: float = 0.2,
-# ) -> Tensor:
-#     """
-#     Apply cascaded allpass decorrelation to HRIRs using torchaudio.
-
-#     Args:
-#         hrirs: (B, chunk_size, hrir_len) — the HRIR waveforms
-#         blend: (B, chunk_size) — decorrelation strength, 0=identity, 1=full
-#         sr: sample rate of the HRIRs
-#         center_freqs: list of center frequencies for allpass sections
-#         q_max: Q at blend=0 (near identity — very narrow phase shift)
-#         q_min: Q at blend=1 (broadband phase shift — maximum decorrelation)
-
-#     Returns:
-#         Tensor: decorrelated HRIRs, same shape as input
-#     """
-#     B, chunk_size, hrir_len = hrirs.shape
-
-#     # Flatten to (B*chunk_size, hrir_len) for allpass_biquad
-#     flat_hrirs = hrirs.reshape(-1, hrir_len)
-
-#     n_levels = 8  # 8 discrete decorrelation levels (0 = identity, 7 = max)
-#     blend_flat = blend.reshape(-1)  # (B*chunk_size,)
-
-#     # Quantize blend to levels
-#     level_indices = (blend_flat * (n_levels - 1)).round().long().clamp(0, n_levels - 1)
-
-#     output = flat_hrirs.clone()
-
-#     for level in range(n_levels):
-#         mask = level_indices == level
-#         if not mask.any():
-#             continue
-
-#         # Skip level 0 entirely — these are early reflections, no filtering
-#         if level == 0:
-#             continue
-
-#         level_blend = level / (n_levels - 1)  # 0.0 to 1.0
-#         level_q = q_max - (q_max - q_min) * (level_blend**2)
-
-#         subset = flat_hrirs[mask]  # (N_subset, hrir_len)
-
-#         # Cascade allpass sections at different frequencies
-#         for freq in center_freqs:
-#             # Skip if frequency is above Nyquist
-#             if freq >= sr / 2:
-#                 continue
-#             subset = allpass_biquad(subset, sr, freq, level_q)
-
-#         output[mask] = subset
-
-#     return output.reshape(B, chunk_size, hrir_len)
 
 
 def compute_reflection_lowpass_freq(
@@ -468,6 +365,7 @@ def batch_fram_brir(
         reflect_ratio = (dist / (velocity * t60.unsqueeze(1))) * (
             reflect_max.unsqueeze(1) - 1
         ) + 1
+
 
         # Random perturbation
         reflect_pertub = torch.empty(B, chunk_size, device=device).uniform_(
