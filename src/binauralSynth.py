@@ -299,6 +299,8 @@ class BinauralSynth:
         intermittent_background_noise_paths: Optional[List[str]] = None,
         occlusion_probability: Optional[float] = 0.4,
         reverb_probability: Optional[float] = 0.7,
+        continuous_background_noise_probability: Optional[float] = 0.5,
+        intermittent_background_noise_probability: Optional[float] = 0.5,
     ):
         """
         Render a batch of binaural audio samples in parallel on the GPU.
@@ -597,7 +599,12 @@ class BinauralSynth:
         # apply continuous background noise if provided
         if continuous_background_noise_paths is not None:
             final_waveforms = self._apply_continuous_background_noise(
-                final_waveforms, continuous_background_noise_paths
+                final_waveforms, continuous_background_noise_paths,continuous_background_noise_probability
+            )
+
+        if intermittent_background_noise_paths is not None:
+            final_waveforms = self._apply_intermittent_background_noise(
+                final_waveforms, intermittent_background_noise_paths,intermittent_background_noise_probability
             )
 
         if self.verbose:
@@ -674,4 +681,93 @@ class BinauralSynth:
         bg_stereo = bg_stereo * apply_mask.unsqueeze(1).unsqueeze(2)  # zero out for samples not getting background
 
         # 4. Mix
+        return waveforms + bg_stereo
+    def _apply_intermittent_background_noise(self, waveforms: torch.Tensor, backgroundNoise: List[str], intermittent_background_probability: float = 0.5, clip_count_range: tuple = (1, 5)):
+        """
+        Mix intermittent background noise into auralized waveforms.
+
+        Args:
+            waveforms: Auralized waveforms of shape (N, 2, sample_length).
+            backgroundNoise: List of file paths to background noise clips.
+            clip_count_range: (min, max) number of background clips to layer per sample.
+            intermittent_background_probability: Probability of applying background noise to each sample.
+
+        Returns:
+            Mixed waveforms of shape (N, 2, sample_length).
+        """
+        background_waveforms, lengths = self._load_waveforms(backgroundNoise)
+
+        # Discard clips that are >= sample_length
+        keep = lengths < self.sample_length
+        background_waveforms = background_waveforms[keep]
+        lengths = lengths[keep]
+
+        if keep.sum() < keep.shape[0]:
+            print(f"Warning: Discarded {keep.shape[0] - keep.sum().item()} background clips that were too long")
+
+        n_samples = waveforms.shape[0]
+        n_bg = background_waveforms.shape[0]
+        max_bg_len = background_waveforms.shape[1]
+        apply_mask = (torch.rand(n_samples, device=self.device) < intermittent_background_probability).float()
+
+        min_clips, max_clips = clip_count_range
+        # Random number of clips per sample: (N,)
+        n_clips_per_sample = torch.randint(min_clips, max_clips + 1, (n_samples,), device=self.device)  # (N,)
+        max_clip_count = max_clips  # upper bound for the padded dimension
+
+        # Select max_clip_count clips per sample, mask out the excess ones later
+        # bg_indices: (N, max_clip_count)
+        bg_indices = torch.randint(0, n_bg, (n_samples, max_clip_count), device=self.device)
+        selected_bg = background_waveforms[bg_indices.flatten()].view(n_samples, max_clip_count, max_bg_len)  # (N, K, T_padded)
+        selected_lengths = lengths[bg_indices.flatten()].view(n_samples, max_clip_count)  # (N, K)
+
+        # Validity mask: which clip slots are actually used  (N, K)
+        clip_slot_indices = torch.arange(max_clip_count, device=self.device).unsqueeze(0)  # (1, K)
+        clip_valid_mask = clip_slot_indices < n_clips_per_sample.unsqueeze(1)  # (N, K)
+
+        # Random placement offset within sample_length for each clip
+        # Each clip starts at a random position; it occupies [start, start + clip_length)
+        random_starts = (torch.rand(n_samples, max_clip_count, device=self.device) * self.sample_length).long()  # (N, K)
+
+        # Build the mixed background buffer: (N, target_len)
+        bg_buffer = torch.zeros(n_samples, self.sample_length, device=self.device)
+
+        # For each clip slot, scatter the clip into the buffer at its random start
+        for k in range(max_clip_count):
+            clip_data = selected_bg[:, k, :]       # (N, T_padded)
+            clip_len = selected_lengths[:, k]       # (N,)
+            start = random_starts[:, k]             # (N,)
+            valid = clip_valid_mask[:, k]            # (N,)
+
+            # Build time indices for this clip: (N, max_bg_len)
+            t = torch.arange(max_bg_len, device=self.device).unsqueeze(0)  # (1, T_padded)
+            target_positions = start.unsqueeze(1) + t  # (N, T_padded)
+
+            # Mask: within clip's true length AND within sample_length
+            in_clip = t < clip_len.unsqueeze(1)                    # (N, T_padded)
+            in_bounds = target_positions < self.sample_length              # (N, T_padded)
+            slot_valid = valid.unsqueeze(1)                        # (N, 1)
+            place_mask = in_clip & in_bounds & slot_valid          # (N, T_padded)
+
+            # Clamp positions for scatter safety
+            target_positions = target_positions.clamp(0, self.sample_length - 1)
+
+            # Scatter-add the clip samples into the buffer
+            bg_buffer.scatter_add_(1, target_positions, clip_data * place_mask.float())
+
+        # SNR-based gain scaling
+        signal_rms = waveforms.flatten(1).pow(2).mean(dim=1).sqrt() + 1e-8  # (N,)
+        noise_rms = bg_buffer.pow(2).mean(dim=1).sqrt() + 1e-8              # (N,)
+
+        min_snr_db, max_snr_db = 4.0, 15.0
+        target_snr_db = min_snr_db + (max_snr_db - min_snr_db) * torch.rand(n_samples, device=self.device)
+        snr_linear_target = 10.0 ** (target_snr_db / 20.0)
+        noise_gains = (signal_rms / noise_rms) / snr_linear_target  # (N,)
+
+        # Apply gain and broadcast to stereo
+        bg_buffer = bg_buffer * noise_gains.unsqueeze(1)                    # (N, target_len)
+        bg_stereo = bg_buffer.unsqueeze(1).expand(-1, 2, -1)                # (N, 2, target_len)
+        bg_stereo = bg_stereo * apply_mask.unsqueeze(1).unsqueeze(2)        # zero out samples not selected
+
+        # Mix
         return waveforms + bg_stereo
