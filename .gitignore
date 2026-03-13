@@ -16,7 +16,7 @@
 
 !LICENSE
 !README.md
-!benchmark_synth.py
+#!benchmark_synth.py
 !script.py
 
 !pyproject.toml
