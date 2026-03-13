@@ -2,7 +2,7 @@ import time
 
 import torch
 
-from src.binauralSynth import BinauralSynth
+from binauralSynthesizer import SceneAuralizer
 
 
 def run_stress_test(num_sounds=1024, batch_size=32):
@@ -16,7 +16,7 @@ def run_stress_test(num_sounds=1024, batch_size=32):
 
     print(f"--- Stress Test: {num_sounds} sounds total, Batch Size: {batch_size} ---")
 
-    synth = BinauralSynth(
+    synth = SceneAuralizer(
         label_names=label_pool,
         sample_total_length=duration_sec,
         sample_rate=sample_rate,

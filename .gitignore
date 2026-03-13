@@ -5,15 +5,20 @@
 
 !.gitignore
 
-!src/__init__.py
-!src/batchedHrir.py
-!src/rirTensor.py
-!src/framRir.py
-!src/binauralSynth.py
-!src/occlusionFilter.py
-!src/batchFramRir.py
-!src/smartRandomizedPlacement.py
+!binauralSynthesizer/__init__.py
+!binauralSynthesizer/batchedHrir.py
+!binauralSynthesizer/rirTensor.py
+!binauralSynthesizer/framRir.py
+!binauralSynthesizer/sceneAuralizer.py
+!binauralSynthesizer/occlusionFilter.py
+!binauralSynthesizer/batchFramRir.py
+!binauralSynthesizer/smartRandomizedPlacement.py
 
 !LICENSE
+!README.md
 !benchmark_synth.py
 !script.py
+
+!pyproject.toml
+!requirements.txt
+!MANIFEST.in

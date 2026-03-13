@@ -4,7 +4,7 @@ from typing import List, Optional
 import torch
 import torchaudio
 
-from src.batchFramRir import batch_fram_brir
+from .batchFramRir import batch_fram_brir
 
 from .batchedHrir import BatchedHRIR
 
@@ -14,7 +14,7 @@ from .rirTensor import RIRTensor
 from .smartRandomizedPlacement import SmartRandomizedPlacement
 
 
-class BinauralSynth:
+class SceneAuralizer:
     def __init__(
         self,
         label_names: List[str],

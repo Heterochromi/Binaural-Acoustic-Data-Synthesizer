@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "binauralSynthesizer"
+version = "0.1.0"
+description = "A PyTorch based library for accelerated generation of synthetic Binaural audio"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+    {name = "Baraa sameeh"},
+]
+requires-python = ">=3.9"
+dependencies = [
+    "torch",
+    "torchaudio",
+    "sofar",
+    "torch_geometric",
+]
+
+[project.urls]
+Homepage = "https://github.com/baraasameeh/GameHRTF"
+
+[tool.setuptools.packages.find]
+include = ["binauralSynthesizer*"]
+
+[tool.setuptools.package-data]
+binauralSynthesizer = ["*.py"]

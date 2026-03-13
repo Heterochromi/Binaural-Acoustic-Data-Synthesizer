@@ -1,0 +1,4 @@
+torch
+torchaudio
+sofar
+torch_geometric
