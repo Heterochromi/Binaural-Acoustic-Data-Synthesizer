@@ -20,7 +20,7 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/baraasameeh/GameHRTF"
+Homepage = "https://github.com/Heterochromi/Binaural-Acoustic-Data-Synthesizer"
 
 [tool.setuptools.packages.find]
 include = ["binauralSynthesizer*"]
