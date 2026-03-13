@@ -245,9 +245,6 @@ def batch_fram_brir(
     # density varies ±15% for room character diversity
     density = torch.empty(B, device=device).uniform_(5000, 20000)
     image_counts = (density * t60).int()  # (B,)a
-    print("Image counts per batch item:", image_counts)
-    print("t60", t60)
-    print("Density", density)
 
     # Use maximum image count for uniform tensor operations
     max_image_count = image_counts.max().item()

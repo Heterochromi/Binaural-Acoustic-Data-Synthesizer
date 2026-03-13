@@ -26,6 +26,7 @@ class BinauralSynth:
         max_intance_of_class_per_frame: int = 3,
         frame_length_ms: float = 40,
         batch_size: int = 32,
+        sofa_path: str = None,
         device: torch.device = torch.device("cpu"),
     ):
         self.sample_rate = sample_rate
@@ -36,7 +37,7 @@ class BinauralSynth:
         self.label_names = label_names
         self.sample_length = int(sample_rate * sample_total_length)
         self.hrirTensor: RIRTensor = RIRTensor.from_sofa(
-            "sadie/Database-Master_V2-1/D2/D2_HRIR_SOFA/D2_96K_24bit_512tap_FIR_SOFA.sofa",
+            sofa_path,
             device=self.device,
         )
         self.hrir_kernel_len = int(
@@ -105,7 +106,8 @@ class BinauralSynth:
         reverb_probability: Optional[float] = 0.7,
     ):
         waveforms, original_length = self._load_waveforms(waveform_paths)
-        print("original_length", original_length)
+        if self.verbose:
+            print("original_length", original_length)
         if len(waveforms) != len(labels):
             raise ValueError("Number of waveform paths must match number of labels")
         label_len = len(labels)
@@ -124,7 +126,8 @@ class BinauralSynth:
         )
         room_dim_y = torch.empty(1, dtype=torch.float32).uniform_(2, 4).to(self.device)
         room_dim = torch.cat([room_dim_xz, room_dim_y, room_dim_xz]).to(self.device)
-        print(f"Room dimensions (x, y, z): {room_dim.cpu().numpy()} meters")
+        if self.verbose:
+            print(f"Room dimensions (x, y, z): {room_dim.cpu().numpy()} meters")
         src_pos = torch.empty(label_len, 3, dtype=torch.float32).uniform_(0, 1).to(
             self.device
         ) * room_dim.unsqueeze(0)
@@ -230,7 +233,8 @@ class BinauralSynth:
         # Trim tensor to the longest valid event (remove guaranteed-zero tail)
         max_valid = valid_total_len.max().item()
         combined_samples = combined_samples[:, :, :max_valid]
-        print(f"Combined samples shape after trimming: {combined_samples.shape}")
+        if self.verbose:
+            print(f"Combined samples shape after trimming: {combined_samples.shape}")
 
         # Build a mapping from event index -> placement start; track which were skipped
         offset_list = [0] * label_len
@@ -285,7 +289,8 @@ class BinauralSynth:
 
         # Metadata tensor: [B, 2] -> columns are [dry_end, wet_end]
         # event_bounds = torch.stack([dry_end, wet_end], dim=1)  # (B, 2)
-        print(f"Final waveform shape: {final_waveform.shape}")
+        if self.verbose:
+            print(f"Final waveform shape: {final_waveform.shape}")
 
         return final_waveform, placement_controller.placements
 
