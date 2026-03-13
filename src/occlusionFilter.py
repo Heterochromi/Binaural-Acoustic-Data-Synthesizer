@@ -157,33 +157,39 @@ def apply_occlusion_frequency_domain(
                     batch_size, 1, device=device
                 ).uniform_(*p["attenuation_dip_strength_db"])  # [B, 1]
 
-    freqs = torch.linspace(0, sample_rate / 2, n_fft // 2 + 1, device=device).unsqueeze(
-        0
-    )  # [1, F]
+    freqs = torch.linspace(0, sample_rate / 2, n_fft // 2 + 1, device=device).unsqueeze(0)  # [1, F]
+
+    # Safely clamp frequencies to avoid log2(0) at the DC bin (0 Hz)
+    freqs_safe = torch.clamp(freqs, min=1e-8)
+
+    # Calculate distance from the critical frequency in OCTAVES (Log scale)
+    octave_dist = torch.log2(freqs_safe / crit_freq_hz)
 
     # 1. Low frequency mask (0 to crit_freq_hz): 6dB per octave
-
-    low_fc = crit_freq_hz  # Use crit_freq as the reference point
+    low_fc = crit_freq_hz
     low_freq_mask = low_fc / (low_fc + freqs)
 
-    # 2. Critical frequency mask (gaussian dip at crit_freq_hz)
-    sigma = crit_width_hz / 2.355  # FWHM to sigma
-    gaussian = torch.exp(-0.5 * ((freqs - crit_freq_hz) / sigma) ** 2)
-    attenuation_dip = 10.0 ** (-attenuation_dip_strength_db / 20.0)
-    crit_freq_mask = 1 - gaussian * (attenuation_dip - 1)
+    # 2. Critical frequency mask (Logarithmic Gaussian dip)
+    crit_width_octaves = crit_width_hz / crit_freq_hz
+    sigma_octaves = crit_width_octaves / 2.355
 
-    # 3. high frequency mask (after crit_freq_hz): 9dB per octave
-    high_fc = crit_freq_hz  # Transition point at crit_freq
+    # Gaussian calculated on the log scale
+    gaussian = torch.exp(-0.5 * (octave_dist / sigma_octaves) ** 2)
+
+    # attenuation dip or sound boost calculation
+    transmission_boost_linear = 10.0 ** (attenuation_dip_strength_db / 20.0)
+    crit_freq_mask = 1.0 + gaussian * (transmission_boost_linear - 1.0)
+
+    # 3. High frequency mask (after crit_freq_hz): 9dB per octave
+    high_fc = crit_freq_hz
     high_freq_rolloff = (high_fc / (high_fc + freqs)) ** 1.5
 
-    # Blend masks: use low_freq below crit, high_freq above crit
-    transition_width = crit_width_hz
-    transition = torch.sigmoid((freqs - crit_freq_hz) / (transition_width / 4))
+    # Blend masks: use log-based transition for a smooth, psychoacoustically accurate crossfade
+    transition_width_octaves = crit_width_hz / crit_freq_hz
+    transition = torch.sigmoid(octave_dist / (transition_width_octaves / 4))
 
     # Combine low and high frequency masks with smooth transition
-    freq_response_mask = (
-        1 - transition
-    ) * low_freq_mask + transition * high_freq_rolloff
+    freq_response_mask = (1 - transition) * low_freq_mask + transition * high_freq_rolloff
 
     # 4. Combined frequency mask (apply crit dip on top)
     freq_mask = freq_response_mask * crit_freq_mask  # [n_fft // 2 + 1]
