@@ -20,7 +20,6 @@ class SceneAuralizer:
         label_names: List[str],
         sample_total_length: int = 2,
         sample_rate: int = 44100,
-        subject_id: str = "D2",
         verbose: bool = True,
         max_intance_of_class_per_frame: int = 3,
         frame_length_ms: float = 40,
@@ -29,7 +28,6 @@ class SceneAuralizer:
         device: torch.device = torch.device("cpu"),
     ):
         self.sample_rate = sample_rate
-        self.subject_id = subject_id
         self.verbose = verbose
         self.batch_size = batch_size
         self.device = device
@@ -44,7 +42,7 @@ class SceneAuralizer:
         )
         self.batchHrir = BatchedHRIR(
             sample_rate=self.sample_rate,
-            subject_id="D2",
+            sofa_path=sofa_path,
             device=self.device,
         )
         self.max_intance_of_class_per_frame = max_intance_of_class_per_frame

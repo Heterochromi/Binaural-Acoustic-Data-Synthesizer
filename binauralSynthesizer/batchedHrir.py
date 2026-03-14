@@ -12,47 +12,23 @@ class BatchedHRIR:
     def __init__(
         self,
         sample_rate: int,
-        subject_id: Literal[
-            "D1",
-            "D2",
-            "H3",
-            "H4",
-            "H5",
-            "H6",
-            "H7",
-            "H8",
-            "H9",
-            "H10",
-            "H11",
-            "H12",
-            "H13",
-            "H14",
-            "H15",
-            "H16",
-            "H17",
-            "H18",
-            "H19",
-            "H20",
-        ] = "D2",
         interpolation_mode: Literal[
             "auto", "nearest", "two_point", "three_point"
         ] = "auto",
         verbose: bool = False,
         batch_size: int = 32,
+        sofa_path: str = None,
         device: torch.device = torch.device("cpu"),
     ):
         """
         Args:
-            subject_ids: Subject HRIR to use
             sample_rate: Sample rate
             interpolation_mode: method to estimate angel that does not exactly exist in sadie
             verbose: Enable detailed output
             batch_size: Size of batches to process
+            sofa_path: Path to the SOFA file
+            device: Device to use for processing
         """
-        sadie_path = "sadie/Database-Master_V2-1"
-        hrir_path_slug = "_HRIR_SOFA"
-        hrir_slug_96k = "_96K_24bit_512tap_FIR_SOFA.sofa"  # Slug for the 96 kHz 24-bit 512-tap FIR SOFA file
-        self.subject_id = subject_id
         self.sample_rate = sample_rate
         self.interpolation_mode = interpolation_mode
         self.verbose = verbose
@@ -62,14 +38,9 @@ class BatchedHRIR:
         if self.sample_rate > 96000:
             raise ValueError("Sample rate must be less than or equal to 96 kHz")
 
-        self.hrir_path = os.path.join(
-            sadie_path,
-            self.subject_id,
-            f"{self.subject_id}{hrir_path_slug}",
-            f"{self.subject_id}{hrir_slug_96k}",
-        )
+        self.sofa_path = sofa_path
         self.sampler = Resample(orig_freq=96000, new_freq=self.sample_rate).to(device)
-        self.hrirTensor: RIRTensor = RIRTensor.from_sofa(self.hrir_path, device=device)
+        self.hrirTensor: RIRTensor = RIRTensor.from_sofa(self.sofa_path, device=device)
 
     def render_random_angles_hrir(self, waveforms: torch.Tensor):
         """
