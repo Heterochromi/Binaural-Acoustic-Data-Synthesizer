@@ -22,7 +22,6 @@ class SceneAuralizer:
         sample_rate: int = 44100,
         subject_id: str = "D2",
         verbose: bool = True,
-        max_events_per_batch: int = 10,
         max_intance_of_class_per_frame: int = 3,
         frame_length_ms: float = 40,
         batch_size: int = 32,
@@ -48,7 +47,6 @@ class SceneAuralizer:
             subject_id="D2",
             device=self.device,
         )
-        self.max_events_per_batch = max_events_per_batch
         self.max_intance_of_class_per_frame = max_intance_of_class_per_frame
         self.frame_length_ms = frame_length_ms
         self.frame_length_samples = int(
@@ -76,7 +74,7 @@ class SceneAuralizer:
             peak = waveform.abs().max()
             if peak > 0:
                 waveform = waveform / peak
-            waveform = waveform.to(self.device)
+            # waveform = waveform.to(self.device)
             self._waveform_cache[file_path] = waveform
             waveforms.append(waveform.clone())
 
