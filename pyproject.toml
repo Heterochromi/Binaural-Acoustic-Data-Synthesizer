@@ -18,7 +18,7 @@ dependencies = [
     "sofar",
     "torch_geometric",
     "torchcodec",
-    "scipy
+    "scipy"
 ]
 
 [project.urls]
